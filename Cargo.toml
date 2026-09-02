@@ -1,0 +1,43 @@
+[package]
+name = "bulti"
+version = "0.1.0"
+edition = "2024"
+description = "불티(Bulti) — 컨텍스트 핸드오프 체인으로 긴 작업을 끝까지 완결하는 CLI 에이전트"
+license = "MIT"
+rust-version = "1.85"
+
+[[bin]]
+name = "bulti"
+path = "src/main.rs"
+
+[dependencies]
+# 직렬화
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# 경로 해석 (~/.bulti)
+dirs = "5"
+
+# 오류 처리
+thiserror = "1"
+anyhow = "1"
+
+# 로깅
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# 비동기 런타임 (단계 0에서 최소 구성, 이후 단계에서 확장)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
