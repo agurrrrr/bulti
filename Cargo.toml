@@ -49,6 +49,9 @@ regex = "1"
 # 이미지 base64 (DESIGN.md §4.4 비전 read_file)
 base64 = "0.22"
 
+# 작업 히스토리 저장 (DESIGN.md §4.7)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"

@@ -4,6 +4,7 @@
 
 pub mod config_cmd;
 pub mod endpoint_cmd;
+pub mod history_cmd;
 pub mod version;
 
 use clap::{Parser, Subcommand};
@@ -137,11 +138,31 @@ pub struct HistoryArgs {
 #[derive(Debug, clap::Subcommand)]
 pub enum HistoryCommand {
     /// 최근 작업 목록.
-    List,
+    List(HistoryListArgs),
     /// 작업 상세 조회.
     Show { id: String },
     /// 마지막 작업 조회.
-    Last,
+    Last(HistoryLastArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HistoryListArgs {
+    /// 조회할 최근 개수.
+    #[arg(short = 'n', long)]
+    pub n: Option<u64>,
+    /// 상태 필터 (running|completed|failed|incomplete|interrupted).
+    #[arg(long)]
+    pub status: Option<String>,
+    /// 체인 ID 필터.
+    #[arg(long)]
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HistoryLastArgs {
+    /// 해당 체인의 마지막 작업 조회.
+    #[arg(long)]
+    pub chain: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -227,11 +248,7 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
             Ok(1)
         }
         Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
-        Command::History(args) => {
-            tracing::warn!("history 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
-            let _ = args;
-            Ok(1)
-        }
+        Command::History(args) => history_cmd::run(args),
         Command::Skill(args) => {
             tracing::warn!("skill 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
             let _ = args;

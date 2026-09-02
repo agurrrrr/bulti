@@ -11,10 +11,12 @@ pub mod bash;
 pub mod edit_file;
 pub mod glob;
 pub mod grep;
+pub mod history;
 pub mod read_file;
 pub mod util;
 pub mod write_file;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -40,6 +42,9 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, ToolSpec>,
     /// 비전 엔드포인트 여부 (read_file 이미지 처리에 사용).
     vision: bool,
+    /// 상태 변경 도구(write_file/edit_file/bash)가 만진 파일 경로 (§4.7.1).
+    /// `dispatch`가 `&self`를 유지하면서 수집하기 위해 RefCell을 사용한다.
+    files_touched: RefCell<Vec<String>>,
 }
 
 impl ToolRegistry {
@@ -48,6 +53,7 @@ impl ToolRegistry {
         Self {
             tools: BTreeMap::new(),
             vision,
+            files_touched: RefCell::new(Vec::new()),
         }
     }
 
@@ -79,9 +85,54 @@ impl ToolRegistry {
     /// 툴을 실행한다. 미등록 툴은 `unknown tool` 오류를 반환한다.
     pub async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
         match self.tools.get(name) {
-            Some(spec) => (spec.handler)(args).await,
+            Some(spec) => {
+                self.collect_files_touched(name, &args);
+                (spec.handler)(args).await
+            }
             None => Err(format!("unknown tool: {name}")),
         }
+    }
+
+    /// 상태 변경 도구(write_file/edit_file/bash) 호출에서 파일 경로를 수집한다 (§4.7.1).
+    ///
+    /// - `write_file`/`edit_file`: `path` 인자.
+    /// - `bash`: cwd가 프로젝트 루트로 고정이므로 명령 문자열에서 경로 힌트만 수집한다.
+    fn collect_files_touched(&self, name: &str, args: &serde_json::Value) {
+        let mut paths: Vec<String> = Vec::new();
+        match name {
+            "write_file" | "edit_file" => {
+                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                    if !p.trim().is_empty() {
+                        paths.push(p.to_string());
+                    }
+                }
+            }
+            "bash" => {
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                    paths.extend(extract_path_hints(cmd));
+                }
+            }
+            _ => return,
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let mut touched = self.files_touched.borrow_mut();
+        for p in paths {
+            if !touched.contains(&p) {
+                touched.push(p);
+            }
+        }
+    }
+
+    /// 상태 변경 도구가 만진 파일 경로 목록을 반환한다 (§4.7.1).
+    pub fn files_touched(&self) -> Vec<String> {
+        self.files_touched.borrow().clone()
+    }
+
+    /// 수집된 파일 경로를 초기화한다 (새 run 시작 시).
+    pub fn clear_files_touched(&self) {
+        self.files_touched.borrow_mut().clear();
     }
 
     /// 등록된 툴 이름 목록.
@@ -115,7 +166,58 @@ pub fn normalize_schema(schema: serde_json::Value) -> serde_json::Value {
     schema
 }
 
-/// 네이티브 툴 6종을 모두 등록한 레지스트리를 만든다.
+/// bash 명령 문자열에서 파일 경로 힌트를 추출한다.
+///
+/// cwd가 프로젝트 루트로 고정되므로, 파일을 만지거나 편집하는 명령
+/// (write_file/edit_file/bash 힌트)의 피연산자로 보이는 경로를 수집한다.
+/// 정확한 파싱 대신 힌트 수준의 추출로 충분하다 (§4.7.1 "bash는 힌트만").
+fn extract_path_hints(cmd: &str) -> Vec<String> {
+    // 상태 변경을 유발할 가능성이 있는 명령어 접두사.
+    const MUTATING: &[&str] = &[
+        "write_file", "edit_file", "cat >", "cat >>", "echo >", "echo >>",
+        "mkdir -p", "touch ", "rm ", "mv ", "cp ", "sed -i", "git add",
+        "tee ", ">", ">>",
+    ];
+    // 접두사가 있는 하위 명령만 검사한다. (전체 문자열에서 접두사 발견 시)
+    let mut paths: Vec<String> = Vec::new();
+    let has_mutating = MUTATING.iter().any(|m| cmd.contains(m));
+    if !has_mutating {
+        return paths;
+    }
+    // 경로처럼 보이는 토큰을 수집한다 (확장자 포함 파일 경로).
+    for tok in cmd.split_whitespace() {
+        let tok = tok.trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        if looks_like_path(tok) {
+            paths.push(tok.to_string());
+        }
+    }
+    paths
+}
+
+/// 토큰이 파일 경로처럼 보이는지 판단한다.
+fn looks_like_path(tok: &str) -> bool {
+    if tok.is_empty() {
+        return false;
+    }
+    // 확장자(.rs, .toml, .md, .json 등)가 붙은 경로.
+    if tok.contains('/') {
+        return true;
+    }
+    // `src/x.rs`처럼 확장자만으로 경로로 보이는 경우 (슬래시 없이도).
+    if tok.contains('.') {
+        let ext = tok.rsplit('.').next().unwrap_or("");
+        if !ext.is_empty() && !ext.contains('/') {
+            return true;
+        }
+    }
+    // git add 등은 파일명만 와도 수집.
+    if tok.starts_with("src/") || tok.starts_with("tests/") || tok.starts_with("docs/") {
+        return true;
+    }
+    false
+}
+
+/// 네이티브 툴 + history 조회 툴을 모두 등록한 레지스트리를 만든다.
 pub fn native_registry(vision: bool) -> ToolRegistry {
     let mut reg = ToolRegistry::new(vision);
     bash::register(&mut reg);
@@ -124,6 +226,8 @@ pub fn native_registry(vision: bool) -> ToolRegistry {
     edit_file::register(&mut reg);
     glob::register(&mut reg);
     grep::register(&mut reg);
+    history::register_list(&mut reg);
+    history::register_read(&mut reg);
     reg
 }
 
@@ -208,14 +312,75 @@ mod tests {
         assert!(normalized.get("required").is_none());
     }
 
-    /// 네이티브 레지스트리에 6종 툴이 등록된다.
+    /// 네이티브 레지스트리에 툴들이 등록된다.
     #[test]
-    fn native_registry_has_6_tools() {
+    fn native_registry_has_tools() {
         let reg = native_registry(false);
         let names = reg.names();
-        assert_eq!(names.len(), 6);
-        for name in ["bash", "read_file", "write_file", "edit_file", "glob", "grep"] {
+        assert_eq!(names.len(), 8);
+        for name in [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "history_list",
+            "history_read",
+        ] {
             assert!(names.contains(&name.to_string()), "missing {name}");
         }
+    }
+
+    /// 상태 변경 도구 호출 시 파일 경로가 수집된다 (§4.7.1).
+    #[tokio::test]
+    async fn files_touched_collected_from_mutating_tools() {
+        let reg = native_registry(false);
+
+        // write_file: path 수집.
+        reg.dispatch(
+            "write_file",
+            serde_json::json!({"path": "src/new.rs", "content": "x"}),
+        )
+        .await
+        .unwrap();
+        // edit_file: path 수집.
+        reg.dispatch(
+            "edit_file",
+            serde_json::json!({"path": "src/tools/mod.rs", "find": "a", "replace": "b"}),
+        )
+        .await
+        .unwrap_err(); // 실제 파일이 없어 오류지만 수집은 수행됨.
+        // bash: 경로 힌트 수집.
+        reg.dispatch("bash", serde_json::json!({"command": "cat > out.txt hi"}))
+            .await
+            .unwrap();
+
+        let touched = reg.files_touched();
+        assert!(touched.contains(&"src/new.rs".to_string()), "{touched:?}");
+        assert!(touched.contains(&"src/tools/mod.rs".to_string()), "{touched:?}");
+        assert!(touched.contains(&"out.txt".to_string()), "{touched:?}");
+    }
+
+    /// 읽기 전용 도구는 파일을 수집하지 않는다.
+    #[tokio::test]
+    async fn files_touched_ignores_readonly_tools() {
+        let reg = native_registry(false);
+        reg.dispatch("grep", serde_json::json!({"pattern": "foo"}))
+            .await
+            .unwrap();
+        assert!(reg.files_touched().is_empty());
+    }
+
+    /// clear_files_touched 는 수집된 경로를 초기화한다 (새 run 시작 시).
+    #[tokio::test]
+    async fn clear_files_touched_resets() {
+        let reg = native_registry(false);
+        reg.dispatch("write_file", serde_json::json!({"path": "a.rs", "content": "x"}))
+            .await
+            .unwrap();
+        assert_eq!(reg.files_touched(), vec!["a.rs".to_string()]);
+        reg.clear_files_touched();
+        assert!(reg.files_touched().is_empty());
     }
 }
