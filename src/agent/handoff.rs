@@ -296,8 +296,7 @@ mod tests {
 
     /// 9섹션 모두 포함한 샘플 요약 (게이트 통과용).
     fn good_summary() -> String {
-        format!(
-            r#"1. 원 요청/의도: 자동 컨텍스트 핸드오프 구현.
+        r#"1. 원 요청/의도: 자동 컨텍스트 핸드오프 구현.
 2. 핵심 기술/개념: 토큰 추정, 9섹션 요약.
 3. 열람·변경 파일: src/agent/handoff.rs.
 4. 한 일: 트리거·파서·품질 게이트 구현.
@@ -307,7 +306,7 @@ mod tests {
 8. 하지 말 것: 세션 재사용 금지.
 9. 다음 한 걸음: wiremock e2e 테스트.
 "#
-        )
+        .to_string()
     }
 
     // ── 트리거 (§4.6.1) ──
@@ -665,8 +664,7 @@ mod tests {
     async fn e2e_handoff_no_next_task_chain_complete() {
         let server = MockServer::start().await;
 
-        let summary = format!(
-            r#"1. 원 요청/의도: 자동 컨텍스트 핸드오프 구현.
+        let summary = r#"1. 원 요청/의도: 자동 컨텍스트 핸드오프 구현.
 2. 핵심 기술/개념: 토큰 추정, 9섹션 요약.
 3. 열람·변경 파일: src/agent/handoff.rs.
 4. 한 일: 트리거·파서·품질 게이트 구현.
@@ -677,7 +675,7 @@ mod tests {
 9. 다음 한 걸음: 없음.
 작업 완료
 "#
-        );
+        .to_string();
         let body = sse_body(&[
             json!({
                 "choices": [{"delta": {"content": &summary}, "finish_reason": null}],

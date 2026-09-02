@@ -196,16 +196,20 @@ mod tests {
 
     #[test]
     fn empty_loop_positive_at_6_turns() {
-        let mut ctx = GuardContext::default();
-        ctx.empty_turns = 6;
+        let mut ctx = GuardContext {
+            empty_turns: 6,
+            ..GuardContext::default()
+        };
         let r = check_empty_loop(&ctx);
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn empty_loop_negative_below_6_turns() {
-        let mut ctx = GuardContext::default();
-        ctx.empty_turns = 5;
+        let mut ctx = GuardContext {
+            empty_turns: 5,
+            ..GuardContext::default()
+        };
         assert_eq!(check_empty_loop(&ctx), GuardOutcome::Pass);
     }
 
@@ -281,7 +285,7 @@ mod tests {
     fn fffd_negative_below_min_20() {
         // 최소 20 룬 미만은 검사 안 함
         let content = "\u{FFFD}\u{FFFD}"; // 2 룬
-        assert_eq!(check_fffd_degenerate(&content), GuardOutcome::Pass);
+        assert_eq!(check_fffd_degenerate(content), GuardOutcome::Pass);
     }
 
     // ── future-intention nudge (#6290/#6294) ──
@@ -315,8 +319,10 @@ mod tests {
 
     #[test]
     fn future_intention_positive_limit_2() {
-        let mut ctx = GuardContext::default();
-        ctx.future_nudges = 2;
+        let mut ctx = GuardContext {
+            future_nudges: 2,
+            ..GuardContext::default()
+        };
         let r = check_future_intention(&ctx, 0, "수정하겠습니다.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
@@ -325,25 +331,31 @@ mod tests {
 
     #[test]
     fn build_gate_positive() {
-        let mut ctx = GuardContext::default();
-        ctx.code_modified = true;
-        ctx.bash_called = false;
+        let mut ctx = GuardContext {
+            code_modified: true,
+            bash_called: false,
+            ..GuardContext::default()
+        };
         let r = check_build_gate(&ctx, "빌드가 통과했습니다.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn build_gate_negative_bash_called() {
-        let mut ctx = GuardContext::default();
-        ctx.code_modified = true;
-        ctx.bash_called = true; // bash 호출했으므로 build gate 통과
+        let mut ctx = GuardContext {
+            code_modified: true,
+            bash_called: true, // bash 호출했으므로 build gate 통과
+            ..GuardContext::default()
+        };
         assert_eq!(check_build_gate(&ctx, "빌드가 통과했습니다."), GuardOutcome::Pass);
     }
 
     #[test]
     fn build_gate_negative_no_code_modified() {
-        let mut ctx = GuardContext::default();
-        ctx.code_modified = false;
+        let mut ctx = GuardContext {
+            code_modified: false,
+            ..GuardContext::default()
+        };
         assert_eq!(check_build_gate(&ctx, "빌드가 통과했습니다."), GuardOutcome::Pass);
     }
 
@@ -371,8 +383,10 @@ mod tests {
 
     #[test]
     fn pause_summary_positive_handoff_after_2() {
-        let mut ctx = GuardContext::default();
-        ctx.pause_nudges = 2;
+        let mut ctx = GuardContext {
+            pause_nudges: 2,
+            ..GuardContext::default()
+        };
         let r = check_pause_summary(&ctx, "중단 시점에서 이어서 하겠습니다.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
         // Trigger 사유가 handoff인지 확인
@@ -396,8 +410,10 @@ mod tests {
 
     #[test]
     fn update_after_tool_call_resets_future_on_state_change() {
-        let mut ctx = GuardContext::default();
-        ctx.future_nudges = 2;
+        let mut ctx = GuardContext {
+            future_nudges: 2,
+            ..GuardContext::default()
+        };
         update_after_tool_call(&mut ctx, "write_file:x".to_string(), true);
         assert_eq!(ctx.future_nudges, 0);
         assert!(ctx.state_change_called);
