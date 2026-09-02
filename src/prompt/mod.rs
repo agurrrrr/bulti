@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::{Config, EndpointConfig};
+use crate::skills::SkillIndex;
 
 /// 빌트인 베이스 (include_str! 로 포함, 저장소에서 버전 관리).
 const BASE_MD: &str = include_str!("base.md");
@@ -59,12 +60,7 @@ pub struct PromptContext {
 }
 
 /// 스킬 인덱스 항목.
-#[derive(Debug, Clone)]
-pub struct SkillIndex {
-    pub name: String,
-    pub description: String,
-}
-
+/// (`src/skills/mod.rs` 에서 정의한다.)
 /// MCP 서버 인덱스 항목.
 #[derive(Debug, Clone)]
 pub struct McpIndex {

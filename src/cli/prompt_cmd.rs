@@ -13,7 +13,9 @@ use crate::prompt;
 pub fn run(args: PromptArgs, cfg: &Config) -> Result<i32, Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let project_root = cwd.clone();
-    let ctx = prompt::context_from_config(cfg, cwd, project_root, vec![], vec![])?;
+    let global_dir = Config::config_dir().map_err(|e| e.to_string())?;
+    let skills = crate::skills::discover(&project_root, &global_dir)?;
+    let ctx = prompt::context_from_config(cfg, cwd, project_root, skills, vec![])?;
 
     match args.command {
         PromptCommand::Show => {

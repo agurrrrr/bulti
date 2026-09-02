@@ -13,11 +13,13 @@ pub mod glob;
 pub mod grep;
 pub mod history;
 pub mod read_file;
+pub mod skill_load;
 pub mod util;
 pub mod write_file;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -218,7 +220,9 @@ fn looks_like_path(tok: &str) -> bool {
 }
 
 /// 네이티브 툴 + history 조회 툴을 모두 등록한 레지스트리를 만든다.
-pub fn native_registry(vision: bool) -> ToolRegistry {
+///
+/// `cwd`/`global_dir` 은 `skill_load` 도구가 스킬을 발견·로드하는 데 사용한다.
+pub fn native_registry(vision: bool, cwd: PathBuf, global_dir: PathBuf) -> ToolRegistry {
     let mut reg = ToolRegistry::new(vision);
     bash::register(&mut reg);
     read_file::register(&mut reg);
@@ -228,6 +232,7 @@ pub fn native_registry(vision: bool) -> ToolRegistry {
     grep::register(&mut reg);
     history::register_list(&mut reg);
     history::register_read(&mut reg);
+    skill_load::register(&mut reg, cwd, global_dir);
     reg
 }
 
@@ -315,9 +320,9 @@ mod tests {
     /// 네이티브 레지스트리에 툴들이 등록된다.
     #[test]
     fn native_registry_has_tools() {
-        let reg = native_registry(false);
+        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
         let names = reg.names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         for name in [
             "bash",
             "read_file",
@@ -327,6 +332,7 @@ mod tests {
             "grep",
             "history_list",
             "history_read",
+            "skill_load",
         ] {
             assert!(names.contains(&name.to_string()), "missing {name}");
         }
@@ -335,7 +341,7 @@ mod tests {
     /// 상태 변경 도구 호출 시 파일 경로가 수집된다 (§4.7.1).
     #[tokio::test]
     async fn files_touched_collected_from_mutating_tools() {
-        let reg = native_registry(false);
+        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
 
         // write_file: path 수집.
         reg.dispatch(
@@ -365,7 +371,7 @@ mod tests {
     /// 읽기 전용 도구는 파일을 수집하지 않는다.
     #[tokio::test]
     async fn files_touched_ignores_readonly_tools() {
-        let reg = native_registry(false);
+        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
         reg.dispatch("grep", serde_json::json!({"pattern": "foo"}))
             .await
             .unwrap();
@@ -375,7 +381,7 @@ mod tests {
     /// clear_files_touched 는 수집된 경로를 초기화한다 (새 run 시작 시).
     #[tokio::test]
     async fn clear_files_touched_resets() {
-        let reg = native_registry(false);
+        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
         reg.dispatch("write_file", serde_json::json!({"path": "a.rs", "content": "x"}))
             .await
             .unwrap();
