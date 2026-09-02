@@ -34,10 +34,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util"] }
 
 # HTTP (DESIGN.md §2.4)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# SSE 스트리밍 파싱 (DESIGN.md §2.4)
+eventsource-stream = "0.2"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
 
 [lints.rust]
 unsafe_code = "forbid"
