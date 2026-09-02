@@ -3,6 +3,7 @@
 //! DESIGN.md §4.12 CLI 인터페이스를 따른다.
 
 pub mod config_cmd;
+pub mod endpoint_cmd;
 pub mod version;
 
 use clap::{Parser, Subcommand};
@@ -225,11 +226,7 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
             let _ = args;
             Ok(1)
         }
-        Command::Endpoint(args) => {
-            tracing::warn!("endpoint 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
-            let _ = args;
-            Ok(1)
-        }
+        Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
         Command::History(args) => {
             tracing::warn!("history 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
             let _ = args;
