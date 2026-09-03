@@ -8,6 +8,7 @@ pub mod history_cmd;
 pub mod mcp_cmd;
 pub mod prompt_cmd;
 pub mod skill_cmd;
+pub mod update_cmd;
 pub mod version;
 
 use clap::{Parser, Subcommand};
@@ -246,6 +247,9 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         Command::Config(args) => config_cmd::run(args, cfg),
         // 이후 단계에서 구현할 서브커맨드. 단계 0 에서는 아직 미구현 안내.
         Command::Run(args) => {
+            // run 시작 시 백그라운드 업데이트 확인 → stderr 알림 (DESIGN.md §4.11).
+            let (repo, mode) = crate::cli::update_cmd::update_config(cfg);
+            crate::update::notify_background(&repo, &mode);
             tracing::warn!("run 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
             let _ = args;
             Ok(1)
@@ -255,10 +259,6 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         Command::Skill(args) => skill_cmd::run(args),
         Command::Mcp(args) => mcp_cmd::run(args, cfg),
         Command::Prompt(args) => prompt_cmd::run(args, cfg),
-        Command::Update(args) => {
-            tracing::warn!("update 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
-            let _ = args;
-            Ok(1)
-        }
+        Command::Update(args) => update_cmd::run(args, cfg),
     }
 }

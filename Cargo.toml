@@ -34,7 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util"] }
 
 # HTTP (DESIGN.md §2.4)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking"] }
 
 # SSE 스트리밍 파싱 (DESIGN.md §2.4)
 eventsource-stream = "0.2"
@@ -53,8 +53,14 @@ base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rmcp = { version = "3.2.0", default-features = false, features = ["client", "transport-child-process"] }
 
-[dev-dependencies]
+# GitHub 릴리즈 자동 업데이트 (DESIGN.md §4.11)
+semver = "1"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
 tempfile = "3"
+
+[dev-dependencies]
 wiremock = "0.6"
 
 [lints.rust]
