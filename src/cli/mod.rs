@@ -5,6 +5,7 @@
 pub mod config_cmd;
 pub mod endpoint_cmd;
 pub mod history_cmd;
+pub mod mcp_cmd;
 pub mod prompt_cmd;
 pub mod skill_cmd;
 pub mod version;
@@ -252,11 +253,7 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
         Command::History(args) => history_cmd::run(args),
         Command::Skill(args) => skill_cmd::run(args),
-        Command::Mcp(args) => {
-            tracing::warn!("mcp 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");
-            let _ = args;
-            Ok(1)
-        }
+        Command::Mcp(args) => mcp_cmd::run(args, cfg),
         Command::Prompt(args) => prompt_cmd::run(args, cfg),
         Command::Update(args) => {
             tracing::warn!("update 서브커맨드는 아직 구현되지 않았습니다 (단계 0)");

@@ -23,7 +23,7 @@ pub fn schema() -> serde_json::Value {
 }
 
 /// glob 툴을 레지스트리에 등록한다.
-pub fn register(reg: &mut ToolRegistry) {
+pub fn register(reg: &ToolRegistry) {
     let handler: ToolHandler = std::sync::Arc::new(|args| {
         Box::pin(async move {
             let pattern = match str_arg(&args, "pattern") {

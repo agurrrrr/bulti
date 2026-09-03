@@ -12,15 +12,16 @@ pub mod edit_file;
 pub mod glob;
 pub mod grep;
 pub mod history;
+pub mod mcp_call;
+pub mod mcp_tools;
 pub mod read_file;
 pub mod skill_load;
 pub mod util;
 pub mod write_file;
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 
@@ -41,27 +42,29 @@ pub struct ToolSpec {
 
 /// ToolRegistry. 정의·디스패처 통합의 단일 출처.
 pub struct ToolRegistry {
-    tools: BTreeMap<String, ToolSpec>,
+    /// 툴 정의+디스패처. `dispatch`가 `&self`로 호출되고 옵트인 주입이
+    /// 디스패처에서 발생하므로 Mutex 로 감싸 Sync 를 유지한다.
+    tools: Mutex<BTreeMap<String, ToolSpec>>,
     /// 비전 엔드포인트 여부 (read_file 이미지 처리에 사용).
     vision: bool,
     /// 상태 변경 도구(write_file/edit_file/bash)가 만진 파일 경로 (§4.7.1).
-    /// `dispatch`가 `&self`를 유지하면서 수집하기 위해 RefCell을 사용한다.
-    files_touched: RefCell<Vec<String>>,
+    /// `dispatch`가 `&self`를 유지하면서 수집하기 위해 Mutex를 사용한다 (ToolRegistry는 Sync).
+    files_touched: Mutex<Vec<String>>,
 }
 
 impl ToolRegistry {
     /// 빈 레지스트리를 만든다.
     pub fn new(vision: bool) -> Self {
         Self {
-            tools: BTreeMap::new(),
+            tools: Mutex::new(BTreeMap::new()),
             vision,
-            files_touched: RefCell::new(Vec::new()),
+            files_touched: Mutex::new(Vec::new()),
         }
     }
 
     /// 툴을 등록한다. 스키마는 직렬화 시 `required: null` → `[]`로 정규화된다.
     pub fn register(
-        &mut self,
+        &self,
         name: &str,
         description: &str,
         parameters: serde_json::Value,
@@ -76,20 +79,34 @@ impl ToolRegistry {
                 parameters,
             },
         };
-        self.tools.insert(name.to_string(), ToolSpec { def, handler });
+        self.tools
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), ToolSpec { def, handler });
     }
 
     /// 모델에게 노출할 툴 정의 목록. 요청 본문의 `tools` 배열에 쓰인다.
     pub fn definitions(&self) -> Vec<ToolDef> {
-        self.tools.values().map(|spec| spec.def.clone()).collect()
+        self.tools
+            .lock()
+            .unwrap()
+            .values()
+            .map(|spec| spec.def.clone())
+            .collect()
     }
 
     /// 툴을 실행한다. 미등록 툴은 `unknown tool` 오류를 반환한다.
     pub async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
-        match self.tools.get(name) {
-            Some(spec) => {
-                self.collect_files_touched(name, &args);
-                (spec.handler)(args).await
+        let spec = self.tools.lock().unwrap().get(name).map(|s| {
+            let handler = s.handler.clone();
+            let name = name.to_string();
+            let args = args.clone();
+            (name, args, handler)
+        });
+        match spec {
+            Some((name, args, handler)) => {
+                self.collect_files_touched(&name, &args);
+                handler(args).await
             }
             None => Err(format!("unknown tool: {name}")),
         }
@@ -119,7 +136,7 @@ impl ToolRegistry {
         if paths.is_empty() {
             return;
         }
-        let mut touched = self.files_touched.borrow_mut();
+        let mut touched = self.files_touched.lock().unwrap();
         for p in paths {
             if !touched.contains(&p) {
                 touched.push(p);
@@ -129,17 +146,17 @@ impl ToolRegistry {
 
     /// 상태 변경 도구가 만진 파일 경로 목록을 반환한다 (§4.7.1).
     pub fn files_touched(&self) -> Vec<String> {
-        self.files_touched.borrow().clone()
+        self.files_touched.lock().unwrap().clone()
     }
 
     /// 수집된 파일 경로를 초기화한다 (새 run 시작 시).
     pub fn clear_files_touched(&self) {
-        self.files_touched.borrow_mut().clear();
+        self.files_touched.lock().unwrap().clear();
     }
 
     /// 등록된 툴 이름 목록.
     pub fn names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        self.tools.lock().unwrap().keys().cloned().collect()
     }
 
     /// 비전 엔드포인트 여부.
@@ -219,20 +236,29 @@ fn looks_like_path(tok: &str) -> bool {
     false
 }
 
-/// 네이티브 툴 + history 조회 툴을 모두 등록한 레지스트리를 만든다.
+/// 네이티브 툴 + history 조회 툴 + MCP 도구를 모두 등록한 레지스트리를 만든다.
 ///
 /// `cwd`/`global_dir` 은 `skill_load` 도구가 스킬을 발견·로드하는 데 사용한다.
-pub fn native_registry(vision: bool, cwd: PathBuf, global_dir: PathBuf) -> ToolRegistry {
-    let mut reg = ToolRegistry::new(vision);
-    bash::register(&mut reg);
-    read_file::register(&mut reg);
-    write_file::register(&mut reg);
-    edit_file::register(&mut reg);
-    glob::register(&mut reg);
-    grep::register(&mut reg);
-    history::register_list(&mut reg);
-    history::register_read(&mut reg);
-    skill_load::register(&mut reg, cwd, global_dir);
+/// `mcp_servers`/`mcp_manager` 는 MCP 2단계 레이지 로딩(`mcp_tools`/`mcp_call`)에 사용한다.
+pub fn native_registry(
+    vision: bool,
+    cwd: PathBuf,
+    global_dir: PathBuf,
+    mcp_servers: BTreeMap<String, crate::config::McpConfig>,
+    mcp_manager: Arc<crate::mcp::McpManager>,
+) -> Arc<ToolRegistry> {
+    let reg = Arc::new(ToolRegistry::new(vision));
+    bash::register(reg.as_ref());
+    read_file::register(reg.as_ref());
+    write_file::register(reg.as_ref());
+    edit_file::register(reg.as_ref());
+    glob::register(reg.as_ref());
+    grep::register(reg.as_ref());
+    history::register_list(reg.as_ref());
+    history::register_read(reg.as_ref());
+    skill_load::register(reg.as_ref(), cwd, global_dir);
+    mcp_tools::register(&reg, mcp_servers.clone(), mcp_manager.clone());
+    mcp_call::register(&reg, mcp_servers, mcp_manager);
     reg
 }
 
@@ -247,7 +273,7 @@ mod tests {
     /// 등록한 툴의 정의와 디스패처가 같은 레지스트리에서 나오는지 확인한다.
     #[tokio::test]
     async fn registry_definitions_and_dispatch_from_same_source() {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         reg.register(
             "echo",
             "입력 그대로 반환",
@@ -320,9 +346,15 @@ mod tests {
     /// 네이티브 레지스트리에 툴들이 등록된다.
     #[test]
     fn native_registry_has_tools() {
-        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
+        let reg = native_registry(
+            false,
+            PathBuf::from("."),
+            PathBuf::from("."),
+            BTreeMap::new(),
+            Arc::new(crate::mcp::McpManager::new()),
+        );
         let names = reg.names();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 11);
         for name in [
             "bash",
             "read_file",
@@ -333,6 +365,8 @@ mod tests {
             "history_list",
             "history_read",
             "skill_load",
+            "mcp_tools",
+            "mcp_call",
         ] {
             assert!(names.contains(&name.to_string()), "missing {name}");
         }
@@ -341,7 +375,13 @@ mod tests {
     /// 상태 변경 도구 호출 시 파일 경로가 수집된다 (§4.7.1).
     #[tokio::test]
     async fn files_touched_collected_from_mutating_tools() {
-        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
+        let reg = native_registry(
+            false,
+            PathBuf::from("."),
+            PathBuf::from("."),
+            BTreeMap::new(),
+            Arc::new(crate::mcp::McpManager::new()),
+        );
 
         // write_file: path 수집.
         reg.dispatch(
@@ -371,7 +411,13 @@ mod tests {
     /// 읽기 전용 도구는 파일을 수집하지 않는다.
     #[tokio::test]
     async fn files_touched_ignores_readonly_tools() {
-        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
+        let reg = native_registry(
+            false,
+            PathBuf::from("."),
+            PathBuf::from("."),
+            BTreeMap::new(),
+            Arc::new(crate::mcp::McpManager::new()),
+        );
         reg.dispatch("grep", serde_json::json!({"pattern": "foo"}))
             .await
             .unwrap();
@@ -381,7 +427,13 @@ mod tests {
     /// clear_files_touched 는 수집된 경로를 초기화한다 (새 run 시작 시).
     #[tokio::test]
     async fn clear_files_touched_resets() {
-        let reg = native_registry(false, PathBuf::from("."), PathBuf::from("."));
+        let reg = native_registry(
+            false,
+            PathBuf::from("."),
+            PathBuf::from("."),
+            BTreeMap::new(),
+            Arc::new(crate::mcp::McpManager::new()),
+        );
         reg.dispatch("write_file", serde_json::json!({"path": "a.rs", "content": "x"}))
             .await
             .unwrap();

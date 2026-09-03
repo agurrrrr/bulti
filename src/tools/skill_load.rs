@@ -27,7 +27,7 @@ pub fn schema() -> serde_json::Value {
 /// skill_load 도구를 레지스트리에 등록한다.
 ///
 /// `cwd`/`global_dir` 을 등록 시점에 캡처해 디스패처에서 사용한다.
-pub fn register(reg: &mut ToolRegistry, cwd: PathBuf, global_dir: PathBuf) {
+pub fn register(reg: &ToolRegistry, cwd: PathBuf, global_dir: PathBuf) {
     let handler: ToolHandler = std::sync::Arc::new(move |args| {
         let cwd = cwd.clone();
         let global_dir = global_dir.clone();

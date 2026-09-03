@@ -66,6 +66,9 @@ pub struct McpConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// 서버 프로세스에 주입할 환경 변수.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -275,6 +278,7 @@ pub(crate) mod tests {
                         "@modelcontextprotocol/server-filesystem".to_string(),
                         "/home/me".to_string(),
                     ],
+                    env: std::collections::BTreeMap::new(),
                     description: Some("파일시스템 접근".to_string()),
                 },
             )]),

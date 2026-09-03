@@ -49,7 +49,7 @@ fn unicode_warning(find: &str) -> Option<String> {
 }
 
 /// edit_file 툴을 레지스트리에 등록한다.
-pub fn register(reg: &mut ToolRegistry) {
+pub fn register(reg: &ToolRegistry) {
     let handler: ToolHandler = std::sync::Arc::new(|args| {
         Box::pin(async move {
             let path_str = match str_arg(&args, "path") {

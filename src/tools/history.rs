@@ -40,7 +40,7 @@ pub fn read_schema() -> serde_json::Value {
 }
 
 /// history_list 도구를 레지스트리에 등록한다.
-pub fn register_list(reg: &mut ToolRegistry) {
+pub fn register_list(reg: &ToolRegistry) {
     let handler: ToolHandler = std::sync::Arc::new(|args| {
         Box::pin(async move {
             let query = str_arg(&args, "query").unwrap_or_default();
@@ -91,7 +91,7 @@ pub fn register_list(reg: &mut ToolRegistry) {
 }
 
 /// history_read 도구를 레지스트리에 등록한다.
-pub fn register_read(reg: &mut ToolRegistry) {
+pub fn register_read(reg: &ToolRegistry) {
     let handler: ToolHandler = std::sync::Arc::new(|args| {
         Box::pin(async move {
             let run_id = match int_arg(&args, "run_id", 0) {

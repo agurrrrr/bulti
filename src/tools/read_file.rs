@@ -92,7 +92,7 @@ fn image_content(path: &std::path::Path) -> Result<String, String> {
 }
 
 /// read_file 툴을 레지스트리에 등록한다.
-pub fn register(reg: &mut ToolRegistry) {
+pub fn register(reg: &ToolRegistry) {
     let vision = reg.vision();
     let handler: ToolHandler = std::sync::Arc::new(move |args| {
         let vision = vision;
