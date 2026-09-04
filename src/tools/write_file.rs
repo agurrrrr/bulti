@@ -60,7 +60,7 @@ mod tests {
 
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let mut reg = ToolRegistry::new(false);
-        register(&mut reg);
+        register(&reg);
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch("write_file", args).await
         })

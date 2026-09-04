@@ -10,7 +10,7 @@
 use serde_json::json;
 
 use crate::agent::context::estimate_messages_tokens;
-use crate::llm::{ChatOptions, ChatRequest, LlmClient, Message};
+use crate::llm::Message;
 
 /// 핸드오프 트리거 기본 임계값 (%). config 기본값과 동일하게 75.
 pub const DEFAULT_HANDOFF_THRESHOLD_PCT: u8 = 75;
@@ -281,6 +281,7 @@ pub fn handoff_report_json(decision: &HandoffDecision) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{ChatOptions, ChatRequest, LlmClient};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -134,7 +134,7 @@ mod tests {
 
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let mut reg = ToolRegistry::new(false);
-        register(&mut reg);
+        register(&reg);
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch("grep", args).await
         })
@@ -175,7 +175,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "fn foo() {}\n").unwrap();
         let mut reg = ToolRegistry::new(false);
-        register(&mut reg);
+        register(&reg);
         let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch(
                 "grep",
@@ -200,7 +200,7 @@ mod tests {
         std::fs::write(dir.path().join(".git/config"), "secret\n").unwrap();
         std::fs::write(dir.path().join("real.txt"), "secret\n").unwrap();
         let mut reg = ToolRegistry::new(false);
-        register(&mut reg);
+        register(&reg);
         let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch(
                 "grep",

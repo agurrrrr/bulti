@@ -232,7 +232,7 @@ pub fn run_update(repo: &str, mode: &UpdateMode) -> Result<i32> {
             }
             // download 모드: 다운로드·검증·교체.
             println!("새 버전 {latest} 다운로드 중...");
-            match download_and_install(repo, &latest) {
+            match download_and_install(repo) {
                 Ok(path) => {
                     self_replace::replace(&path)?;
                     Ok(0)
@@ -308,7 +308,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
 }
 
 /// 다운로드·검증·임시 해제·실행 비트 설정까지 수행하고, 교체 대상 바이너리 경로를 반환한다.
-fn download_and_install(repo: &str, tag: &str) -> Result<PathBuf> {
+fn download_and_install(repo: &str) -> Result<PathBuf> {
     // 빌드 타깃 트리플. cfg 기반으로 결정.
     let triple = target_triple();
     let asset_name = format!("bulti-{triple}.tar.gz");
@@ -424,11 +424,8 @@ pub fn notify_background(repo: &str, mode: &UpdateMode) {
     let repo = repo.to_string();
     let mode = mode.clone();
     std::thread::spawn(move || {
-        match check(&repo, &mode, false) {
-            Ok(CheckResult::UpdateAvailable { latest }) => {
-                eprintln!("새 버전 {latest} 사용 가능 — bulti update");
-            }
-            _ => {}
+        if let Ok(CheckResult::UpdateAvailable { latest }) = check(&repo, &mode, false) {
+            eprintln!("새 버전 {latest} 사용 가능 — bulti update");
         }
     });
 }
@@ -446,8 +443,6 @@ mod tests {
 
     #[test]
     fn cache_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        // 임시 경로 직접 사용.
         let cache = UpdateCache {
             etag: "\"abc\"".to_string(),
             checked_at: "123".to_string(),

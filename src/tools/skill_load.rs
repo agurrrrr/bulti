@@ -69,7 +69,7 @@ mod tests {
     async fn loads_bundled_skill() {
         let root = temp_dir("bundled");
         let mut reg = crate::tools::ToolRegistry::new(false);
-        register(&mut reg, root.clone(), root.clone());
+        register(&reg, root.clone(), root.clone());
         let res = reg
             .dispatch(
                 "skill_load",
@@ -85,7 +85,7 @@ mod tests {
     async fn missing_skill_returns_error() {
         let root = temp_dir("missing");
         let mut reg = crate::tools::ToolRegistry::new(false);
-        register(&mut reg, root.clone(), root.clone());
+        register(&reg, root.clone(), root.clone());
         let res = reg
             .dispatch("skill_load", serde_json::json!({"name": "nope"}))
             .await;
@@ -98,7 +98,7 @@ mod tests {
     async fn missing_name_returns_error() {
         let root = temp_dir("missing_name");
         let mut reg = crate::tools::ToolRegistry::new(false);
-        register(&mut reg, root.clone(), root.clone());
+        register(&reg, root.clone(), root.clone());
         let res = reg.dispatch("skill_load", serde_json::json!({})).await;
         assert!(res.is_err());
         std::fs::remove_dir_all(&root).unwrap();

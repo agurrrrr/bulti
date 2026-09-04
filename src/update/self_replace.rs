@@ -34,7 +34,6 @@ pub fn replace(new_binary: &Path) -> Result<()> {
     // 실행 비트 동기화.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let perm = fs::metadata(&exe)
             .with_context(|| "현재 바이너리 메타데이터 읽기 실패")?
             .permissions();
@@ -50,9 +49,8 @@ pub fn replace(new_binary: &Path) -> Result<()> {
             let _ = fs::remove_file(&exe);
             fs::rename(&tmp, &exe)
                 .with_context(|| format!("바이너리 교체 실패: {} -> {}", tmp.display(), exe.display()))
-                .map_err(|err| {
+                .inspect_err(|_| {
                     let _ = fs::remove_file(&tmp);
-                    err
                 })
                 .map(|_| ())
                 .map_err(|_| anyhow!("바이너리 교체 실패: {e}"))

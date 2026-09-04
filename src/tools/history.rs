@@ -160,8 +160,8 @@ mod tests {
 
     fn reg() -> ToolRegistry {
         let mut reg = ToolRegistry::new(false);
-        register_list(&mut reg);
-        register_read(&mut reg);
+        register_list(&reg);
+        register_read(&reg);
         reg
     }
 
