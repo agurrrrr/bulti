@@ -40,20 +40,10 @@ pub struct SkillIndex {
     pub description: String,
 }
 
-/// 스킬 본문의 출처.
-#[derive(Debug, Clone)]
-enum SkillSource {
-    /// 파일 시스템 스킬 (프로젝트 또는 글로벌).
-    File(PathBuf),
-    /// 번들 스킬 (바이너리 내장).
-    Bundle(&'static str),
-}
-
-/// 발견된 스킬 (인덱스 + 본문 출처).
+/// 발견된 스킬 (인덱스).
 #[derive(Debug, Clone)]
 struct Skill {
     index: SkillIndex,
-    source: SkillSource,
 }
 
 /// 번들 스킬 파일 모음 (include_str! 로 내장).
@@ -107,7 +97,6 @@ fn discover_in_dir(dir: &Path) -> Result<Vec<Skill>, SkillError> {
             if let Some(index) = parse_skill_file(&name, &skill_file)? {
                 skills.push(Skill {
                     index,
-                    source: SkillSource::File(skill_file),
                 });
             }
         }
@@ -144,7 +133,7 @@ pub fn discover(project_root: &Path, global_dir: &Path) -> Result<Vec<SkillIndex
     skills.retain(|s| seen.insert(s.index.name.clone()));
 
     // 번들 스킬 (프로젝트·글로벌에 동명이 없을 때만 추가).
-    for (name, body) in BUNDLED {
+    for (_name, body) in BUNDLED {
         if let Ok((n, desc)) = parse_frontmatter(body) {
             if !seen.contains(&n) {
                 skills.push(Skill {
@@ -152,7 +141,6 @@ pub fn discover(project_root: &Path, global_dir: &Path) -> Result<Vec<SkillIndex
                         name: n.to_string(),
                         description: desc,
                     },
-                    source: SkillSource::Bundle(name),
                 });
                 seen.insert(n);
             }

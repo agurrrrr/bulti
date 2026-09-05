@@ -1,28 +1,13 @@
 //! 불티(Bulti) — 컨텍스트 핸드오프 체인으로 긴 작업을 끝까지 완결하는 CLI 에이전트.
 //!
 //! 진입점: clap 파싱, 서브커맨드 디스패치, exit code 매핑 (DESIGN.md §4.12).
-
-#![deny(clippy::all)]
-#![deny(unsafe_code)]
-
-mod agent;
-mod cli;
-mod config;
-mod endpoint;
-mod history;
-mod llm;
-mod mcp;
-mod prompt;
-mod skills;
-mod tools;
-mod update;
+//! 로직은 `bulti` 라이브러리 크레이트에 있고, 여기서는 CLI 파싱과 디스패치만 담당한다.
 
 use std::process::ExitCode;
 
+use bulti::cli::{self, Cli};
+use bulti::config::Config;
 use clap::Parser;
-
-use crate::cli::Cli;
-use crate::config::Config;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()

@@ -8,6 +8,7 @@
 //! - SIGINT(`tokio::signal::ctrl_c`) → interrupted 기록, exit 130
 
 use std::io::{IsTerminal, Read};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,9 +48,6 @@ impl RunOutcome {
         }
     }
 }
-
-/// SIGINT 수신 플래그.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// `bulti run` 진입점.
 pub fn run(args: RunArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::Error>> {
@@ -267,7 +265,7 @@ async fn run_chain(
             conn,
             run_id,
             &history::RunFinish {
-                status: history::RunStatus::from_str(status_str),
+                status: history::RunStatus::from_str(status_str).unwrap(),
                 result: Some(result.content.clone()),
                 input_tokens: Some(result.input_tokens),
                 output_tokens: Some(result.output_tokens),

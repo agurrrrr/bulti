@@ -41,16 +41,20 @@ impl RunStatus {
             Self::Interrupted => "interrupted",
         }
     }
+}
+
+impl std::str::FromStr for RunStatus {
+    type Err = std::convert::Infallible;
 
     /// 문자열에서 상태로 변환한다.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "incomplete" => Self::Incomplete,
             "interrupted" => Self::Interrupted,
             _ => Self::Running,
-        }
+        })
     }
 }
 
