@@ -1,13 +1,17 @@
 //! `bulti chat` 서브커맨드 구현 (DESIGN.md §4.13.1 대화형 프롬프트 루프).
 //!
-//! 단계 2 범위: TTY에서 대화형 프롬프트 루프를 시작한다. 한 턴(사용자 프롬프트
+//! 단계 2~3 범위: TTY에서 대화형 프롬프트 루프를 시작한다. 한 턴(사용자 프롬프트
 //! 입력 → 모델 완료 응답)은 §4.3 에이전트 루프를 세그먼트 단위로 실행하는
-//! 공통 코어(`run_segment`)를 재사용한다. 세션 저장·재개(§4.13.2)와
-//! TUI 렌더링(§4.13.3)은 이후 단계에서 구현한다 — 여기서는 스트림 텍스트 모드.
+//! 공통 코어(`run_segment`)를 재사용한다. 세션 저장·재개(§4.13.2)를 지원한다 —
+//! 여기서는 스트림 텍스트 모드.
 //!
 //! - 프롬프트 루프는 `/exit`·`/quit`·Ctrl-D 로 종료, `/help` 로 명령 안내
+//! - `/new` 로 새 세션 시작, `/resume <id>` 로 세션 재개
 //! - Ctrl+C(SIGINT) → interrupted 기록 후 종료 (exit 130 규약 재사용)
-//! - 대화형 전용 옵션: `--endpoint`, `--model`, `--system-file`, `--system`
+//! - 대화형 전용 옵션: `--endpoint`, `--model`, `--system-file`, `--system`, `--resume`
+//!
+//! 세션 파일(`~/.bulti/sessions/`)은 대화형 재개용 원본, history DB(`~/.bulti/history.db`)
+//! 는 작업 단위 감사용 기록으로 분리한다 (DESIGN.md §4.13.2).
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::str::FromStr;
@@ -22,6 +26,7 @@ use crate::config::{Config, EndpointConfig};
 use crate::history;
 use crate::llm::LlmClient;
 use crate::mcp::McpManager;
+use crate::session;
 
 /// exit code 매핑 (run 과 동일 규약 재사용).
 const EXIT_OK: i32 = 0;
@@ -72,7 +77,39 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         skills,
         mcp_servers,
     )?;
-    let system_prompt = crate::prompt::assemble(&ctx, override_opt)?;
+    let mut system_prompt = crate::prompt::assemble(&ctx, override_opt)?;
+
+    // 세션 복원 (`--resume <id>`). 세션의 endpoint/model 을 사용하고
+    // 시스템 프롬프트에 이전 대화 컨텍스트를 포함한다.
+    let mut session_id = make_uuid();
+    let mut session = session::Session::new(&session_id, &endpoint_name, &endpoint.model);
+    let mut resume_context: Option<String> = None;
+    if let Some(id) = &args.resume {
+        match session::load(id) {
+            Ok(s) => {
+                tracing::info!("세션 '{id}' 을(를) 재개합니다");
+                session_id = id.clone();
+                // 세션의 endpoint/model 을 사용.
+                if let Some(ep) = cfg.endpoints.get(&s.endpoint) {
+                    endpoint = ep.clone();
+                }
+                if !s.model.is_empty() {
+                    endpoint.model = s.model.clone();
+                }
+                // 시스템 프롬프트에 이전 대화 컨텍스트 포함.
+                let ctx = s.conversation_context();
+                if !ctx.is_empty() {
+                    system_prompt = format!("{system_prompt}\n\n[이전 대화 기록]\n{ctx}");
+                }
+                resume_context = Some(ctx);
+                session = s;
+            }
+            Err(e) => {
+                tracing::error!("세션 '{id}' 복원 실패: {e}");
+                return Ok(EXIT_ERROR);
+            }
+        }
+    }
 
     // 도구 레지스트리 + 히스토리 DB (공통 코어).
     let mcp_manager = Arc::new(McpManager::new());
@@ -100,6 +137,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         &args,
         interrupted_flag,
         args.first.clone(),
+        &mut session_id,
+        &mut session,
+        &mut resume_context,
     ))?;
 
     Ok(outcome)
@@ -117,6 +157,9 @@ async fn chat_loop(
     args: &ChatArgs,
     interrupted: Arc<AtomicBool>,
     first_prompt: Option<String>,
+    session_id: &mut String,
+    session: &mut session::Session,
+    resume_context: &mut Option<String>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let client = LlmClient::new();
     let use_color = !args.no_color && std::io::stdout().is_terminal();
@@ -186,10 +229,13 @@ async fn chat_loop(
                 return Ok(EXIT_OK);
             }
             "/new" => {
-                // 새 세션 시작 (세션 저장·재개는 단계 3 범위).
+                // 새 세션 시작.
+                *session_id = make_uuid();
+                *session = session::Session::new(session_id, endpoint_name, &endpoint.model);
+                *resume_context = None;
                 session_chain = make_uuid();
                 turn = 0;
-                println!("{}", color("새 세션을 시작합니다 (체인 id: {session_chain})"));
+                println!("{}", color(&format!("새 세션을 시작합니다 (세션 id: {session_id})")));
                 continue;
             }
             "/help" | "/?" => {
@@ -199,26 +245,54 @@ async fn chat_loop(
             "/resume" => {
                 println!(
                     "{}",
-                    color("/resume 은 세션 저장·재개 단계(3)에서 구현 예정입니다.")
+                    color("/resume 을 사용하려면 세션 id 가 필요합니다 — 예: /resume <id>")
                 );
                 continue;
             }
-            _ => {}
+            _ => {
+                // `/resume <id>` 형태 처리.
+                if let Some(id) = prompt.strip_prefix("/resume ") {
+                    match session::load(id) {
+                        Ok(s) => {
+                            *session_id = id.to_string();
+                            *session = s.clone();
+                            // 이전 대화 기록을 다음 턴 프롬프트 앞에 포함.
+                            *resume_context = Some(s.conversation_context());
+                            println!("{}", color(&format!("세션 '{id}' 을(를) 재개합니다.")));
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("세션 '{id}' 복원 실패: {e}");
+                            println!("{}", color(&format!("세션 '{id}' 을(를) 찾을 수 없습니다.")));
+                            continue;
+                        }
+                    }
+                }
+            }
         }
+
+        // 재개 컨텍스트가 있으면 사용자 프롬프트 앞에 이전 대화 기록을 포함.
+        let effective_prompt = match resume_context.take() {
+            Some(ctx) if !ctx.trim().is_empty() => {
+                format!("{ctx}[이번 사용자 메시지]\n{prompt}")
+            }
+            _ => prompt.clone(),
+        };
 
         // 한 턴 실행 (세그먼트 체인 — run 과 동일한 핸드오프 로직 재사용).
         let chain_id = make_uuid();
-        let outcome = run_turn(
+        let turn_result = run_turn(
             &client,
             conn,
             registry,
             system_prompt,
-            prompt,
+            effective_prompt,
             endpoint,
             endpoint_name,
             cfg,
             &chain_id,
             &session_chain,
+            session_id.clone(),
             turn,
             interrupted.clone(),
             use_color,
@@ -226,12 +300,31 @@ async fn chat_loop(
         .await?;
 
         // interrupted(130) → 대화 종료.
-        if outcome == EXIT_INTERRUPTED {
+        if turn_result.exit_code == EXIT_INTERRUPTED {
             return Ok(EXIT_INTERRUPTED);
+        }
+
+        // 턴 종료 시 세션에 턴을 기록하고 저장 (핸드오프 체인 완료 후).
+        session.push_turn(session::TurnRecord {
+            turn,
+            user: prompt.clone(),
+            assistant: turn_result.assistant_content.clone(),
+            chain_id: chain_id.clone(),
+            files_touched: turn_result.files_touched.clone(),
+        });
+        if let Err(e) = session::save(session) {
+            tracing::error!("세션 저장 실패: {e}");
         }
 
         turn += 1;
     }
+}
+
+/// 한 턴의 결과 (chat_loop 에서 세션 저장에 사용).
+struct TurnResult {
+    exit_code: i32,
+    assistant_content: String,
+    files_touched: Vec<String>,
 }
 
 /// 한 턴(사용자 프롬프트 → 응답)을 세그먼트 체인으로 실행한다.
@@ -248,13 +341,14 @@ async fn run_turn(
     cfg: &Config,
     chain_id: &str,
     session_chain: &str,
+    session_id: String,
     turn: u32,
     interrupted: Arc<AtomicBool>,
     use_color: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
+) -> Result<TurnResult, Box<dyn std::error::Error>> {
     let mut depth_guard = HandoffDepthGuard::new();
     let max_depth = cfg.context.max_handoff_depth;
-    let mut current_prompt = prompt;
+    let mut current_prompt = prompt.clone();
     let mut segment_index: u32 = 0;
     let mut parent_run_id: Option<i64> = None;
     let mut run_ids: Vec<i64> = Vec::new();
@@ -262,12 +356,17 @@ async fn run_turn(
     let mut all_input: u64 = 0;
     let mut all_output: u64 = 0;
     let mut segment_statuses: Vec<SegmentStatus> = Vec::new();
+    let mut final_content = String::new();
     let start = Instant::now();
 
     loop {
         // SIGINT 확인.
         if interrupted.load(Ordering::Relaxed) {
-            return Ok(EXIT_INTERRUPTED);
+            return Ok(TurnResult {
+                exit_code: EXIT_INTERRUPTED,
+                assistant_content: final_content,
+                files_touched,
+            });
         }
 
         let params = SegmentParams {
@@ -282,7 +381,7 @@ async fn run_turn(
             handoff_warn_depth: cfg.context.handoff_warn_depth,
         };
 
-        // run 시작 기록 (session_id 는 단계 3에서 연결 예정).
+        // run 시작 기록 (대화형 세션 id 연결).
         let run_id = history::start_run(
             conn,
             &history::RunStart {
@@ -291,6 +390,7 @@ async fn run_turn(
                 model: Some(endpoint.model.clone()),
                 prompt: current_prompt.clone(),
                 chain_id: chain_id.to_string(),
+                session_id: Some(session_id.clone()),
                 segment_index,
                 handoff_depth: depth_guard.depth,
                 parent_run_id,
@@ -313,6 +413,11 @@ async fn run_turn(
         all_input += result.input_tokens;
         all_output += result.output_tokens;
         segment_statuses.push(result.status.clone());
+
+        // 최종 응답 내용 추적.
+        if !result.content.trim().is_empty() {
+            final_content = result.content.clone();
+        }
 
         history::finish_run(
             conn,
@@ -348,11 +453,11 @@ async fn run_turn(
         }
 
         // 최종 응답 출력 (스트림 텍스트 모드). TTY 면 cyan 색상 적용.
-        if !result.content.trim().is_empty() {
+        if !final_content.trim().is_empty() {
             let rendered = if use_color {
-                format!("\x1b[36m{}\x1b[0m", result.content)
+                format!("\x1b[36m{}\x1b[0m", final_content)
             } else {
-                result.content.clone()
+                final_content.clone()
             };
             println!("\n{rendered}");
             println!();
@@ -362,14 +467,26 @@ async fn run_turn(
         match result.status {
             SegmentStatus::Failed => {
                 println!("(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)");
-                return Ok(EXIT_OK);
+                return Ok(TurnResult {
+                    exit_code: EXIT_OK,
+                    assistant_content: final_content,
+                    files_touched,
+                });
             }
             SegmentStatus::Incomplete => {
                 println!("(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)");
-                return Ok(EXIT_OK);
+                return Ok(TurnResult {
+                    exit_code: EXIT_OK,
+                    assistant_content: final_content,
+                    files_touched,
+                });
             }
             SegmentStatus::Interrupted => {
-                return Ok(EXIT_INTERRUPTED);
+                return Ok(TurnResult {
+                    exit_code: EXIT_INTERRUPTED,
+                    assistant_content: final_content,
+                    files_touched,
+                });
             }
             SegmentStatus::Completed => {}
         }
@@ -383,7 +500,11 @@ async fn run_turn(
             files_touched.len()
         );
         let _ = (chain_id, session_chain, turn, is_complete);
-        return Ok(EXIT_OK);
+        return Ok(TurnResult {
+            exit_code: EXIT_OK,
+            assistant_content: final_content,
+            files_touched,
+        });
     }
 }
 
@@ -392,7 +513,7 @@ fn print_help() {
     println!("내부 명령:");
     println!("  /exit, /quit, /q  — 대화 종료");
     println!("  /new             — 새 세션 시작");
-    println!("  /resume <id>     — 세션 재개 (단계 3에서 구현 예정)");
+    println!("  /resume <id>     — 세션 재개");
     println!("  /help            — 이 도움말");
     println!("  Ctrl-D           — 대화 종료 (EOF)");
     println!("  Ctrl+C           — 중단 후 종료");

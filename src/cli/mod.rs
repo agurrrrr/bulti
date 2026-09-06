@@ -9,6 +9,7 @@ pub mod history_cmd;
 pub mod mcp_cmd;
 pub mod prompt_cmd;
 pub mod run_cmd;
+pub mod session_cmd;
 pub mod skill_cmd;
 pub mod update_cmd;
 pub mod version;
@@ -35,6 +36,8 @@ pub struct Cli {
 pub enum Command {
     /// 대화형 채팅/TUI 모드.
     Chat(ChatArgs),
+    /// 세션 저장·재개 관리.
+    Session(SessionArgs),
     /// 에이전트 실행 (체인 실행).
     Run(RunArgs),
     /// 엔드포인트 관리.
@@ -75,6 +78,23 @@ pub struct ChatArgs {
     /// 대화 시작 시 첫 프롬프트 (비대화형 파이프용).
     #[arg(long)]
     pub first: Option<String>,
+    /// 재개할 세션 id.
+    #[arg(long)]
+    pub resume: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub command: SessionCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum SessionCommand {
+    /// 세션 목록.
+    List,
+    /// 세션 삭제.
+    Delete { id: String },
 }
 
 #[derive(Debug, clap::Args)]
@@ -274,6 +294,7 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         // 이후 단계에서 구현할 서브커맨드. 단계 0 에서는 아직 미구현 안내.
         // run 시작 시 백그라운드 업데이트 확인 → stderr 알림 (DESIGN.md §4.11).
         Command::Chat(args) => chat_cmd::run(args, cfg),
+        Command::Session(args) => session_cmd::run(args),
         Command::Run(args) => run_cmd::run(args, cfg),
         Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
         Command::History(args) => history_cmd::run(args),

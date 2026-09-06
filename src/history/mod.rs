@@ -101,6 +101,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), HistoryError> {
             prompt        TEXT NOT NULL,     -- 세그먼트 시작 프롬프트
             result        TEXT,              -- 최종 응답 또는 핸드오프 요약
             chain_id      TEXT NOT NULL,     -- 같은 run 세그먼트를 잇는 UUID
+            session_id    TEXT,              -- 대화형 세션 id (대화형 재개용 원본 연결)
             segment_index INTEGER NOT NULL DEFAULT 0,
             handoff_depth INTEGER NOT NULL DEFAULT 0,
             parent_run_id INTEGER,           -- 핸드오프로 이어진 직전 run id
@@ -151,6 +152,7 @@ pub struct RunStart {
     pub model: Option<String>,
     pub prompt: String,
     pub chain_id: String,
+    pub session_id: Option<String>,
     pub segment_index: u32,
     pub handoff_depth: u32,
     pub parent_run_id: Option<i64>,
@@ -162,8 +164,8 @@ pub fn start_run(conn: &Connection, info: &RunStart) -> Result<i64, HistoryError
     conn.execute(
         "INSERT INTO runs (
             started_at, cwd, endpoint, model, status, prompt,
-            chain_id, segment_index, handoff_depth, parent_run_id
-        ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9)",
+            chain_id, session_id, segment_index, handoff_depth, parent_run_id
+        ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             now,
             info.cwd,
@@ -171,6 +173,7 @@ pub fn start_run(conn: &Connection, info: &RunStart) -> Result<i64, HistoryError
             info.model.as_deref(),
             info.prompt,
             info.chain_id,
+            info.session_id.as_deref(),
             info.segment_index,
             info.handoff_depth,
             info.parent_run_id,
@@ -226,6 +229,7 @@ pub struct RunRow {
     pub prompt: String,
     pub result: Option<String>,
     pub chain_id: String,
+    pub session_id: Option<String>,
     pub segment_index: u32,
     pub handoff_depth: u32,
     pub parent_run_id: Option<i64>,
@@ -247,13 +251,14 @@ fn row_to_run(row: &rusqlite::Row) -> Result<RunRow, rusqlite::Error> {
         prompt: row.get(7)?,
         result: row.get(8)?,
         chain_id: row.get(9)?,
-        segment_index: row.get::<_, u32>(10)?,
-        handoff_depth: row.get::<_, u32>(11)?,
-        parent_run_id: row.get(12)?,
-        input_tokens: row.get::<_, Option<u64>>(13)?,
-        output_tokens: row.get::<_, Option<u64>>(14)?,
-        files_touched: row.get(15)?,
-        duration_ms: row.get::<_, Option<u64>>(16)?,
+        session_id: row.get(10)?,
+        segment_index: row.get::<_, u32>(11)?,
+        handoff_depth: row.get::<_, u32>(12)?,
+        parent_run_id: row.get(13)?,
+        input_tokens: row.get::<_, Option<u64>>(14)?,
+        output_tokens: row.get::<_, Option<u64>>(15)?,
+        files_touched: row.get(16)?,
+        duration_ms: row.get::<_, Option<u64>>(17)?,
     })
 }
 
@@ -265,7 +270,7 @@ pub fn list_runs(
     chain_id: Option<&str>,
 ) -> Result<Vec<RunRow>, HistoryError> {
     let mut sql = "SELECT id, started_at, finished_at, cwd, endpoint, model, status, prompt,
-        result, chain_id, segment_index, handoff_depth, parent_run_id,
+        result, chain_id, session_id, segment_index, handoff_depth, parent_run_id,
         input_tokens, output_tokens, files_touched, duration_ms
         FROM runs".to_string();
     let mut conds: Vec<String> = Vec::new();
@@ -300,7 +305,7 @@ pub fn list_runs(
 pub fn get_run(conn: &Connection, id: i64) -> Result<Option<RunRow>, HistoryError> {
     let mut stmt = conn.prepare(
         "SELECT id, started_at, finished_at, cwd, endpoint, model, status, prompt,
-        result, chain_id, segment_index, handoff_depth, parent_run_id,
+        result, chain_id, session_id, segment_index, handoff_depth, parent_run_id,
         input_tokens, output_tokens, files_touched, duration_ms
         FROM runs WHERE id = ?1",
     )?;
@@ -313,14 +318,14 @@ pub fn last_run(conn: &Connection, chain: Option<&str>) -> Result<Option<RunRow>
     let (sql, arg): (&str, Option<String>) = match chain {
         Some(c) => (
             "SELECT id, started_at, finished_at, cwd, endpoint, model, status, prompt,
-            result, chain_id, segment_index, handoff_depth, parent_run_id,
+            result, chain_id, session_id, segment_index, handoff_depth, parent_run_id,
             input_tokens, output_tokens, files_touched, duration_ms
             FROM runs WHERE chain_id = ?1 ORDER BY id DESC LIMIT 1",
             Some(c.to_string()),
         ),
         None => (
             "SELECT id, started_at, finished_at, cwd, endpoint, model, status, prompt,
-            result, chain_id, segment_index, handoff_depth, parent_run_id,
+            result, chain_id, session_id, segment_index, handoff_depth, parent_run_id,
             input_tokens, output_tokens, files_touched, duration_ms
             FROM runs ORDER BY id DESC LIMIT 1",
             None,
@@ -365,6 +370,7 @@ mod tests {
                 model: Some("m".to_string()),
                 prompt: "프롬프트".to_string(),
                 chain_id: chain.to_string(),
+                session_id: None,
                 segment_index: seg,
                 handoff_depth: depth,
                 parent_run_id: None,
@@ -425,6 +431,7 @@ mod tests {
                 model: Some("m".to_string()),
                 prompt: "핸드오프 요약+과제".to_string(),
                 chain_id: "chain-1".to_string(),
+                session_id: None,
                 segment_index: 1,
                 handoff_depth: 1,
                 parent_run_id: Some(parent),

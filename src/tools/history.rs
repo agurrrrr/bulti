@@ -189,6 +189,7 @@ mod tests {
                 model: Some("m".to_string()),
                 prompt: "이전 작업 이어서 완료".to_string(),
                 chain_id: "chain-1".to_string(),
+                session_id: None,
                 segment_index: 0,
                 handoff_depth: 0,
                 parent_run_id: None,

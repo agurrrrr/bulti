@@ -226,6 +226,7 @@ async fn run_chain(
                 model: Some(endpoint.model.clone()),
                 prompt: current_prompt.clone(),
                 chain_id: chain_id.to_string(),
+                session_id: None,
                 segment_index,
                 handoff_depth: depth_guard.depth,
                 parent_run_id,

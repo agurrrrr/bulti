@@ -14,6 +14,7 @@ pub mod history;
 pub mod llm;
 pub mod mcp;
 pub mod prompt;
+pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod update;

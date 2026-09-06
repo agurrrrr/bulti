@@ -79,6 +79,7 @@ fn start_run_record(conn: &Connection, chain: &str, seg: u32, depth: u32) -> i64
             model: Some("test-model".to_string()),
             prompt: "프롬프트".to_string(),
             chain_id: chain.to_string(),
+            session_id: None,
             segment_index: seg,
             handoff_depth: depth,
             parent_run_id: None,
