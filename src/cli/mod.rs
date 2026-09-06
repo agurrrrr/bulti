@@ -2,6 +2,7 @@
 //!
 //! DESIGN.md §4.12 CLI 인터페이스를 따른다.
 
+pub mod chat_cmd;
 pub mod config_cmd;
 pub mod endpoint_cmd;
 pub mod history_cmd;
@@ -32,6 +33,8 @@ pub struct Cli {
 /// 서브커맨드.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 대화형 채팅/TUI 모드.
+    Chat(ChatArgs),
     /// 에이전트 실행 (체인 실행).
     Run(RunArgs),
     /// 엔드포인트 관리.
@@ -50,6 +53,28 @@ pub enum Command {
     Update(UpdateArgs),
     /// 버전 출력.
     Version(VersionArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ChatArgs {
+    /// 엔드포인트 이름.
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    /// 모델 이름 오버라이드.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// 시스템 프롬프트 파일.
+    #[arg(long)]
+    pub system_file: Option<String>,
+    /// 인라인 시스템 프롬프트.
+    #[arg(long)]
+    pub system: Option<String>,
+    /// 색상 비활성화.
+    #[arg(long)]
+    pub no_color: bool,
+    /// 대화 시작 시 첫 프롬프트 (비대화형 파이프용).
+    #[arg(long)]
+    pub first: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -248,6 +273,7 @@ pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         Command::Config(args) => config_cmd::run(args, cfg),
         // 이후 단계에서 구현할 서브커맨드. 단계 0 에서는 아직 미구현 안내.
         // run 시작 시 백그라운드 업데이트 확인 → stderr 알림 (DESIGN.md §4.11).
+        Command::Chat(args) => chat_cmd::run(args, cfg),
         Command::Run(args) => run_cmd::run(args, cfg),
         Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
         Command::History(args) => history_cmd::run(args),
