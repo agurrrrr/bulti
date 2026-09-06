@@ -272,11 +272,20 @@ async fn chat_loop(
         }
 
         // 재개 컨텍스트가 있으면 사용자 프롬프트 앞에 이전 대화 기록을 포함.
+        // (같은 세션 내 연속 턴에서도 이전 턴 대화가 누적되어 컨텍스트가 쌓인다.)
         let effective_prompt = match resume_context.take() {
             Some(ctx) if !ctx.trim().is_empty() => {
                 format!("{ctx}[이번 사용자 메시지]\n{prompt}")
             }
-            _ => prompt.clone(),
+            _ => {
+                // 같은 세션 내 이전 턴 대화가 있으면 컨텍스트로 포함해 이어 간다.
+                let ctx = session.conversation_context();
+                if ctx.trim().is_empty() {
+                    prompt.clone()
+                } else {
+                    format!("{ctx}[이번 사용자 메시지]\n{prompt}")
+                }
+            }
         };
 
         // 한 턴 실행 (세그먼트 체인 — run 과 동일한 핸드오프 로직 재사용).
