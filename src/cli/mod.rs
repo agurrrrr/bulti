@@ -27,8 +27,12 @@ use crate::config::Config;
     subcommand_negates_reqs = true
 )]
 pub struct Cli {
+    /// 서브커맨드. 생략하면 대화형(chat) 모드로 바로 진입한다.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+    /// 대화형(chat) 옵션 — 서브커맨드 없이 최상위에서도 사용할 수 있다.
+    #[command(flatten)]
+    pub chat: ChatArgs,
 }
 
 /// 서브커맨드.
@@ -58,7 +62,7 @@ pub enum Command {
     Version(VersionArgs),
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, clap::Args, Default)]
 pub struct ChatArgs {
     /// 엔드포인트 이름.
     #[arg(long)]
@@ -289,21 +293,23 @@ pub struct VersionArgs {
     pub json: bool,
 }
 
-/// 서브커맨드를 실제 동작으로 연결한다.
+/// 서브커맨드를 실제 동작으로 연결한다. 서브커맨드가 없으면 대화형(chat) 모드로 진입한다.
 pub fn dispatch(cli: Cli, cfg: &mut Config) -> Result<i32, Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Version(args) => version::run(args),
-        Command::Config(args) => config_cmd::run(args, cfg),
+        // 서브커맨드 없음 → 대화형 모드로 바로 진입.
+        None => chat_cmd::run(cli.chat, cfg),
+        Some(Command::Version(args)) => version::run(args),
+        Some(Command::Config(args)) => config_cmd::run(args, cfg),
         // 이후 단계에서 구현할 서브커맨드. 단계 0 에서는 아직 미구현 안내.
         // run 시작 시 백그라운드 업데이트 확인 → stderr 알림 (DESIGN.md §4.11).
-        Command::Chat(args) => chat_cmd::run(args, cfg),
-        Command::Session(args) => session_cmd::run(args),
-        Command::Run(args) => run_cmd::run(args, cfg),
-        Command::Endpoint(args) => endpoint_cmd::run(args, cfg),
-        Command::History(args) => history_cmd::run(args),
-        Command::Skill(args) => skill_cmd::run(args),
-        Command::Mcp(args) => mcp_cmd::run(args, cfg),
-        Command::Prompt(args) => prompt_cmd::run(args, cfg),
-        Command::Update(args) => update_cmd::run(args, cfg),
+        Some(Command::Chat(args)) => chat_cmd::run(args, cfg),
+        Some(Command::Session(args)) => session_cmd::run(args),
+        Some(Command::Run(args)) => run_cmd::run(args, cfg),
+        Some(Command::Endpoint(args)) => endpoint_cmd::run(args, cfg),
+        Some(Command::History(args)) => history_cmd::run(args),
+        Some(Command::Skill(args)) => skill_cmd::run(args),
+        Some(Command::Mcp(args)) => mcp_cmd::run(args, cfg),
+        Some(Command::Prompt(args)) => prompt_cmd::run(args, cfg),
+        Some(Command::Update(args)) => update_cmd::run(args, cfg),
     }
 }

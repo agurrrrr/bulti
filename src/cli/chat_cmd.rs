@@ -33,6 +33,90 @@ const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_INTERRUPTED: i32 = 130;
 
+/// 엔드포인트가 설정되지 않았을 때 대화형으로 설정을 안내하고 등록한다.
+/// TTY 가 아니면 `None` 을 반환해 호출부가 오류로 종료하게 한다.
+fn ensure_endpoint_interactive(
+    cfg: &mut Config,
+) -> Result<Option<(String, crate::config::EndpointConfig)>, Box<dyn std::error::Error>> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        tracing::error!("엔드포인트가 설정되지 않았습니다 (bulti endpoint add 로 먼저 등록하세요)");
+        return Ok(None);
+    }
+
+    println!("⚠️  등록된 엔드포인트가 없습니다. 대화를 시작하기 전에 엔드포인트를 설정해 주세요.");
+    println!("    이미 등록된 엔드포인트가 있으면 `bulti endpoint list` 로 확인하고 `bulti endpoint use <이름>` 으로 활성화할 수 있습니다.\n");
+
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    // 이름 입력.
+    print!("엔드포인트 이름 (기본: main): ");
+    std::io::stdout().flush().ok();
+    let name = match lines.next() {
+        Some(Ok(n)) if !n.trim().is_empty() => n.trim().to_string(),
+        Some(Ok(_)) => "main".to_string(),
+        Some(Err(e)) => {
+            tracing::error!("입력 오류: {e}");
+            return Ok(None);
+        }
+        None => {
+            tracing::info!("EOF — 설정 중단");
+            return Ok(None);
+        }
+    };
+
+    // URL 입력.
+    print!("엔드포인트 URL (예: http://127.0.0.1:8084/v1): ");
+    std::io::stdout().flush().ok();
+    let url = match lines.next() {
+        Some(Ok(u)) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => {
+            tracing::error!("URL 은 필수입니다");
+            return Ok(None);
+        }
+    };
+
+    // 모델 입력.
+    print!("모델 이름: ");
+    std::io::stdout().flush().ok();
+    let model = match lines.next() {
+        Some(Ok(m)) if !m.trim().is_empty() => m.trim().to_string(),
+        _ => {
+            tracing::error!("모델 이름은 필수입니다");
+            return Ok(None);
+        }
+    };
+
+    // API 키 입력 (선택).
+    print!("API 키 (선택, 없으면 Enter): ");
+    std::io::stdout().flush().ok();
+    let api_key = match lines.next() {
+        Some(Ok(k)) if !k.trim().is_empty() => Some(k.trim().to_string()),
+        _ => None,
+    };
+
+    // 등록.
+    let ep = crate::config::EndpointConfig {
+        url: url.clone(),
+        api_key: api_key.clone(),
+        model: model.clone(),
+        context_tokens: 0,
+        vision: false,
+        thinking: false,
+        max_iterations: 200,
+    };
+    cfg.endpoints.insert(name.clone(), ep.clone());
+    // 첫 등록이면 자동 활성화.
+    if cfg.active_endpoint.is_none() {
+        cfg.active_endpoint = Some(name.clone());
+    }
+    cfg.save()?;
+    println!("엔드포인트 '{name}' 을(를) 등록하고 활성화했습니다.\n");
+    Ok(Some((name, ep)))
+}
+
 /// `bulti chat` 진입점. 프롬프트 루프를 시작한다.
 pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::Error>> {
     // run 시작 시와 동일하게 백그라운드 업데이트 확인.
@@ -44,15 +128,22 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     let project_root = cwd.clone();
 
     // 활성 엔드포인트 결정 + 오버라이드 적용.
-    let endpoint_name = args
+    // 엔드포인트가 설정되지 않았으면 대화형 루프 안에서 설정을 안내한다.
+    let mut endpoint_name = args
         .endpoint
         .clone()
         .unwrap_or_else(|| cfg.active_endpoint.clone().unwrap_or_default());
     let mut endpoint = match cfg.endpoints.get(&endpoint_name) {
         Some(ep) => ep.clone(),
         None => {
-            tracing::error!("엔드포인트 '{endpoint_name}' 이(가) 없습니다");
-            return Ok(EXIT_ERROR);
+            // 미설정 → 대화형 설정을 안내하는 루프를 먼저 실행.
+            match ensure_endpoint_interactive(cfg)? {
+                Some((name, ep)) => {
+                    endpoint_name = name;
+                    ep
+                }
+                None => return Ok(EXIT_ERROR),
+            }
         }
     };
     if let Some(model) = &args.model {
