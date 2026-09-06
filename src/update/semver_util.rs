@@ -41,10 +41,12 @@ mod tests {
 
     #[test]
     fn newer_detection() {
-        // 현재 버전 0.1.0 기준.
-        assert!(is_newer("v0.2.0"));
+        // 현재 버전 0.2.0 기준 (CARGO_PKG_VERSION).
+        let cur = current_version();
+        let next = format!("v{}.{}.{}", cur.major, cur.minor + 1, 0);
+        assert!(is_newer(&next));
         assert!(is_newer("v1.0.0"));
-        assert!(!is_newer("v0.1.0"));
+        assert!(!is_newer(&format!("v{}", cur)));
         assert!(!is_newer("v0.0.9"));
         assert!(!is_newer("not-a-version"));
     }
