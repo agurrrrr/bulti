@@ -420,16 +420,17 @@ async fn chat_loop(
 }
 
 /// 한 턴의 결과 (chat_loop 에서 세션 저장에 사용).
-struct TurnResult {
-    exit_code: i32,
-    assistant_content: String,
-    files_touched: Vec<String>,
+/// 한 턴(사용자 프롬프트 → 응답)의 결과.
+pub struct TurnResult {
+    pub exit_code: i32,
+    pub assistant_content: String,
+    pub files_touched: Vec<String>,
 }
 
 /// 한 턴(사용자 프롬프트 → 응답)을 세그먼트 체인으로 실행한다.
 /// 핸드오프로 이어지면 새 세그먼트를 실행한다 (run 과 동일 공통 코어).
 #[allow(clippy::too_many_arguments)]
-async fn run_turn(
+pub async fn run_turn(
     client: &LlmClient,
     conn: &rusqlite::Connection,
     registry: &Arc<crate::tools::ToolRegistry>,

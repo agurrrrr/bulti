@@ -1,6 +1,6 @@
 [package]
 name = "bulti"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "불티(Bulti) — 컨텍스트 핸드오프 체인으로 긴 작업을 끝까지 완결하는 CLI 에이전트"
 license = "MIT"

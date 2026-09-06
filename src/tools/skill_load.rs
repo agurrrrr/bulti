@@ -68,7 +68,7 @@ mod tests {
     #[tokio::test]
     async fn loads_bundled_skill() {
         let root = temp_dir("bundled");
-        let mut reg = crate::tools::ToolRegistry::new(false);
+        let reg = crate::tools::ToolRegistry::new(false);
         register(&reg, root.clone(), root.clone());
         let res = reg
             .dispatch(
@@ -84,7 +84,7 @@ mod tests {
     #[tokio::test]
     async fn missing_skill_returns_error() {
         let root = temp_dir("missing");
-        let mut reg = crate::tools::ToolRegistry::new(false);
+        let reg = crate::tools::ToolRegistry::new(false);
         register(&reg, root.clone(), root.clone());
         let res = reg
             .dispatch("skill_load", serde_json::json!({"name": "nope"}))
@@ -97,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn missing_name_returns_error() {
         let root = temp_dir("missing_name");
-        let mut reg = crate::tools::ToolRegistry::new(false);
+        let reg = crate::tools::ToolRegistry::new(false);
         register(&reg, root.clone(), root.clone());
         let res = reg.dispatch("skill_load", serde_json::json!({})).await;
         assert!(res.is_err());

@@ -375,18 +375,6 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn endpoint() -> EndpointConfig {
-        EndpointConfig {
-            url: "http://127.0.0.1:1/v1".to_string(),
-            api_key: None,
-            model: "test-model".to_string(),
-            context_tokens: 0,
-            vision: false,
-            thinking: false,
-            max_iterations: 100,
-        }
-    }
-
     fn params(url: &str, max_iterations: u32) -> SegmentParams {
         SegmentParams {
             endpoint: EndpointConfig {
@@ -416,10 +404,6 @@ mod tests {
                 "choices": [{"delta": {"content": content}}]
             })
         )
-    }
-
-    fn sse_done() -> String {
-        "data: [DONE]\n\n".to_string()
     }
 
     #[tokio::test]

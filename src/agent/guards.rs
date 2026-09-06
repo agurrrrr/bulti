@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn empty_loop_positive_at_6_turns() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             empty_turns: 6,
             ..GuardContext::default()
         };
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn empty_loop_negative_below_6_turns() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             empty_turns: 5,
             ..GuardContext::default()
         };
@@ -292,34 +292,34 @@ mod tests {
 
     #[test]
     fn future_intention_positive_korean() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         let r = check_future_intention(&ctx, 0, "코드를 수정하겠습니다.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn future_intention_positive_english() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         let r = check_future_intention(&ctx, 0, "Let me fix the bug.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn future_intention_negative_with_tool_call() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         // 도구 호출이 있으면 nudge 아님
         assert_eq!(check_future_intention(&ctx, 1, "코드를 수정하겠습니다."), GuardOutcome::Pass);
     }
 
     #[test]
     fn future_intention_negative_no_intent() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         assert_eq!(check_future_intention(&ctx, 0, "완료되었습니다."), GuardOutcome::Pass);
     }
 
     #[test]
     fn future_intention_positive_limit_2() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             future_nudges: 2,
             ..GuardContext::default()
         };
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn build_gate_positive() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             code_modified: true,
             bash_called: false,
             ..GuardContext::default()
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn build_gate_negative_bash_called() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             code_modified: true,
             bash_called: true, // bash 호출했으므로 build gate 통과
             ..GuardContext::default()
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn build_gate_negative_no_code_modified() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             code_modified: false,
             ..GuardContext::default()
         };
@@ -363,27 +363,27 @@ mod tests {
 
     #[test]
     fn pause_summary_positive() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         let r = check_pause_summary(&ctx, "이 작업은 다음 세션에서 이어서 하겠습니다.");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn pause_summary_positive_english() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         let r = check_pause_summary(&ctx, "To be continued...");
         assert!(matches!(r, GuardOutcome::Trigger(_)));
     }
 
     #[test]
     fn pause_summary_negative_normal() {
-        let mut ctx = GuardContext::default();
+        let ctx = GuardContext::default();
         assert_eq!(check_pause_summary(&ctx, "모든 작업이 완료되었습니다."), GuardOutcome::Pass);
     }
 
     #[test]
     fn pause_summary_positive_handoff_after_2() {
-        let mut ctx = GuardContext {
+        let ctx = GuardContext {
             pause_nudges: 2,
             ..GuardContext::default()
         };

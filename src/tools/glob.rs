@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register(&reg);
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch("glob", args).await
@@ -125,7 +125,7 @@ mod tests {
         std::fs::write(dir.path().join(".git/config"), "x").unwrap();
         std::fs::write(dir.path().join("real.txt"), "x").unwrap();
         // cwd 변경 없이 상대 패턴은 프로젝트 루트 기준이므로, 절대 경로로 검증.
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register(&reg);
         let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch("glob", serde_json::json!({"pattern": dir.path().join("**/*").to_string_lossy()})).await

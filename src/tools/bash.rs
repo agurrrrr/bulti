@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn dispatch(args: serde_json::Value) -> String {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register(&reg);
         tokio::runtime::Runtime::new().unwrap().block_on(
             async move { reg.dispatch("bash", args).await.unwrap() },
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn missing_command_is_error() {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register(&reg);
         let res = tokio::runtime::Runtime::new()
             .unwrap()

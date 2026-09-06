@@ -159,7 +159,7 @@ mod tests {
     use crate::tools::ToolRegistry;
 
     fn reg() -> ToolRegistry {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register_list(&reg);
         register_read(&reg);
         reg

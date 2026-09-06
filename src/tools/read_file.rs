@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
-        let mut reg = ToolRegistry::new(false);
+        let reg = ToolRegistry::new(false);
         register(&reg);
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             reg.dispatch("read_file", args).await
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn vision_image_returns_base64() {
-        let mut reg = ToolRegistry::new(true);
+        let reg = ToolRegistry::new(true);
         register(&reg);
         let dir = tempfile::tempdir().unwrap();
         // 1x1 PNG 바이트.

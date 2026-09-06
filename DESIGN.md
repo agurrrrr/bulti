@@ -1,7 +1,7 @@
 # 불티 (Bulti) — 설계 문서
 
 - 문서 버전: v2 · 작성일: 2026-09-02 (개편: 대화형 인터페이스 `bulti chat` + 단발 `bulti run` 두 진입점 도입)
-- 대상 릴리즈: v0.1
+- 대상 릴리즈: v0.2
 - shepherd 프로젝트: `bulti` (담당 양: 양52)
 - 참고 자료: shepherd 위키 `embedded-provider`, `embedded-context-management`, `embedded-handoff-structured-summary`, 실측 llama.cpp `/v1/models` 응답
 

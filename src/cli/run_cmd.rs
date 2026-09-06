@@ -510,7 +510,7 @@ mod tests {
     /// (stdout 캡처 대신 JSON 직렬화 함수를 직접 호출해 순수하게 검증)
     #[test]
     fn json_report_contains_required_fields() {
-        let args = RunArgs {
+        let _args = RunArgs {
             prompt: "p".to_string(),
             endpoint: None,
             model: None,

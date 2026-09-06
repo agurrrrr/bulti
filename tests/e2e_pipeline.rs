@@ -466,3 +466,80 @@ async fn full_pipeline_real_llm() {
     assert_eq!(row.status, "completed");
     assert!(row.files_touched.is_some());
 }
+/// 대화형 경로(`bulti chat`)의 한 턴(`run_turn`)을 검증한다.
+///
+/// run_turn 은 대화형·단발이 공유하는 코어로, 세그먼트 체인을 실행하고
+/// 세션 id 를 history 에 연결한다. wiremock 으로 도구 호출 → 핸드오프(Complete)
+/// 순서를 흉내내고, 세션 연결 기록·파일 터치·정상 종료(exit 0)를 검증한다.
+#[tokio::test]
+async fn chat_turn_end_to_end() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use bulti::cli::chat_cmd::run_turn;
+    use bulti::config::{Config, ContextConfig};
+
+    init_test_tracing();
+    let server = MockServer::start().await;
+
+    // 도구 호출 → 내용 출력 순서로 응답 (단발 run 과 동일 매처).
+    mount_tool_response(&server, tool_call_chunk()).await;
+    mount_tool_response(&server, content_chunk()).await;
+    // 핸드오프 요청: Complete 판정 (체인 완료).
+    mount_handoff_response(&server, handoff_complete_chunk()).await;
+
+    // 임시 history DB (격리).
+    let (conn, _dir) = temp_history();
+    let cwd = std::env::temp_dir();
+    let registry = test_registry(&cwd);
+
+    // 대화형 경로용 Config (핸드오프 설정 기본값).
+    let cfg = Config {
+        version: 1,
+        active_endpoint: None,
+        endpoints: BTreeMap::new(),
+        mcp: BTreeMap::new(),
+        context: ContextConfig {
+            handoff_threshold_pct: 50,
+            max_handoff_depth: 12,
+            handoff_warn_depth: 8,
+        },
+        update: None,
+    };
+
+    let client = LlmClient::new();
+    let endpoint = test_endpoint(&server.uri());
+    let interrupted = Arc::new(AtomicBool::new(false));
+
+    let turn = run_turn(
+        &client,
+        &conn,
+        &registry,
+        "시스템 프롬프트",
+        "프롬프트".to_string(),
+        &endpoint,
+        "mock",
+        &cfg,
+        "chain-chat",
+        "session-chain",
+        "sess-1".to_string(),
+        0,
+        interrupted,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // 대화형 한 턴 검증: 정상 종료(exit 0), 도구 호출(write_file) 수행, 내용 포함.
+    assert_eq!(turn.exit_code, 0);
+    assert!(turn.files_touched.contains(&"mock_out.txt".to_string()));
+    assert!(turn.assistant_content.contains("파일 작성 완료"));
+
+    // 세션 연결 history 파이프라인: 세션 id 가 기록되어야 한다.
+    let rows = history::list_runs(&conn, None, None, None).unwrap();
+    assert!(!rows.is_empty(), "대화형 턴 기록이 있어야 함");
+    // 세션 id 연결 확인.
+    let run = history::get_run(&conn, rows[0].id).unwrap().unwrap();
+    assert!(run.session_id.is_some());
+    assert_eq!(run.session_id.as_deref(), Some("sess-1"));
+}
