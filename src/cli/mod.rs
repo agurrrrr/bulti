@@ -75,6 +75,9 @@ pub struct ChatArgs {
     /// 색상 비활성화.
     #[arg(long)]
     pub no_color: bool,
+    /// ratatui 대신 스트림 텍스트 모드로 대화 (DESIGN.md §4.13.1).
+    #[arg(long)]
+    pub no_tui: bool,
     /// 대화 시작 시 첫 프롬프트 (비대화형 파이프용).
     #[arg(long)]
     pub first: Option<String>,

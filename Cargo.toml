@@ -60,6 +60,10 @@ tar = "0.4"
 flate2 = "1"
 tempfile = "3"
 
+# 대화형 TUI 렌더링 (DESIGN.md §4.13.3)
+ratatui = "0.30"
+crossterm = "0.29"
+
 [dev-dependencies]
 wiremock = "0.6"
 

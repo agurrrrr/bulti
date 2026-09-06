@@ -127,6 +127,79 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     spawn_sigint_watcher(interrupted_flag.clone());
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+
+    // 클로저(TUI processor)와 chat_loop 가 공유할 변수들.
+    let client = LlmClient::new();
+    let session_chain = make_uuid();
+    let use_color = !args.no_color && std::io::stdout().is_terminal();
+
+    // TUI 모드 진입 (DESIGN.md §4.13.3). `--no-tui` 또는 비-TTY 면 스트림 텍스트로 폴백.
+    if !args.no_tui {
+        // TTY 가 아니면 TUI 는 None 을 반환 → 스트림 텍스트 모드.
+        let initial_lines = build_initial_lines(&session);
+        let options = crate::tui::TuiOptions {
+            endpoint_name: endpoint_name.clone(),
+            model: endpoint.model.clone(),
+            session_id: session_id.clone(),
+        };
+
+        // TUI processor: 사용자 메시지 → 한 턴(세그먼트 체인) 실행 → 모델 응답 반환.
+        let mut turn_count = session.turns.len() as u32;
+        let processor = |user_msg: String| -> Result<String, Box<dyn std::error::Error>> {
+            // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
+            let effective_prompt = match resume_context.take() {
+                Some(ctx) if !ctx.trim().is_empty() => {
+                    format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
+                }
+                _ => {
+                    let ctx = session.conversation_context();
+                    if ctx.trim().is_empty() {
+                        user_msg.clone()
+                    } else {
+                        format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
+                    }
+                }
+            };
+
+            let chain_id = make_uuid();
+            let turn_result = rt.block_on(run_turn(
+                &client,
+                &conn,
+                &registry,
+                &system_prompt,
+                effective_prompt,
+                &endpoint,
+                &endpoint_name,
+                cfg,
+                &chain_id,
+                &session_chain,
+                session_id.clone(),
+                turn_count,
+                interrupted_flag.clone(),
+                use_color,
+            ))?;
+
+            // 턴 종료 시 세션에 기록하고 저장.
+            session.push_turn(session::TurnRecord {
+                turn: turn_count,
+                user: user_msg.clone(),
+                assistant: turn_result.assistant_content.clone(),
+                chain_id: chain_id.clone(),
+                files_touched: turn_result.files_touched.clone(),
+            });
+            if let Err(e) = session::save(&session) {
+                tracing::error!("세션 저장 실패: {e}");
+            }
+            turn_count += 1;
+            Ok(turn_result.assistant_content)
+        };
+
+        let tui_outcome = crate::tui::run_tui(&options, initial_lines, processor)?;
+        if let Some(outcome) = tui_outcome {
+            return Ok(outcome.exit_code);
+        }
+    }
+
     let outcome = rt.block_on(chat_loop(
         &conn,
         &registry,
@@ -143,6 +216,23 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     ))?;
 
     Ok(outcome)
+}
+
+/// TUI 초기 화면에 표시할 대화 메시지 목록을 세션에서 구성한다.
+fn build_initial_lines(session: &session::Session) -> Vec<crate::tui::ChatLine> {
+    use crate::tui::{ChatLine, Role};
+    let mut lines = Vec::new();
+    for t in &session.turns {
+        lines.push(ChatLine {
+            role: Role::User,
+            text: t.user.clone(),
+        });
+        lines.push(ChatLine {
+            role: Role::Assistant,
+            text: t.assistant.clone(),
+        });
+    }
+    lines
 }
 
 /// 프롬프트 루프 본체. 한 턴마다 세그먼트 체인을 실행한다.
