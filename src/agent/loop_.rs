@@ -16,7 +16,7 @@ use crate::agent::guards::{
     GuardOutcome,
 };
 use crate::agent::handoff::{
-    build_handoff_messages, build_handoff_prompt, handoff_max_tokens, is_handoff_summary_acceptable,
+    build_handoff_prompt, handoff_max_tokens, is_handoff_summary_acceptable,
     parse_handoff_response, should_attempt_handoff, HandoffDecision, HandoffDepthGuard,
     HandoffResponse,
 };
@@ -80,7 +80,8 @@ pub struct SegmentParams {
 
 /// 한 세그먼트를 실행한다.
 ///
-/// 도구 호출 루프 → 가드 → (도구 없으면) 핸드오프 시도 순서로 진행한다.
+/// 도구 호출 루프 → 가드 → 도구 없는 텍스트는 완료(§4.3). 컨텍스트가 임계에
+/// 도달했을 때만 다음 요청 직전에 핸드오프를 시도한다(§4.6.1).
 pub async fn run_segment(
     client: &LlmClient,
     registry: &ToolRegistry,
@@ -117,6 +118,67 @@ pub async fn run_segment(
     let mut depth_guard = HandoffDepthGuard { depth };
 
     for _ in 0..params.max_iterations {
+        // 다음 요청 직전: 컨텍스트 임계면 핸드오프 (DESIGN.md §4.6.1).
+        if should_attempt_handoff(
+            &messages,
+            params.context_tokens,
+            params.handoff_threshold_pct,
+        ) {
+            if depth_guard.runaway() {
+                tracing::warn!("핸드오프 depth 상한 — incomplete");
+                return SegmentResult {
+                    status: SegmentStatus::Incomplete,
+                    content: final_content,
+                    input_tokens,
+                    output_tokens,
+                    files_touched: registry.files_touched(),
+                    depth: depth_guard.depth,
+                    handoff: None,
+                    handoff_response: None,
+                };
+            }
+            let (handoff_decision, handoff_response) = attempt_handoff(
+                client,
+                &opts,
+                &messages,
+                &mut depth_guard,
+                params.context_tokens,
+            )
+            .await;
+            match handoff_decision {
+                HandoffDecision::Handoff => {
+                    return SegmentResult {
+                        status: SegmentStatus::Completed,
+                        content: final_content,
+                        input_tokens,
+                        output_tokens,
+                        files_touched: registry.files_touched(),
+                        depth: depth_guard.depth,
+                        handoff: Some(HandoffDecision::Handoff),
+                        handoff_response,
+                    };
+                }
+                HandoffDecision::Complete => {
+                    return SegmentResult {
+                        status: SegmentStatus::Completed,
+                        content: final_content,
+                        input_tokens,
+                        output_tokens,
+                        files_touched: registry.files_touched(),
+                        depth: depth_guard.depth,
+                        handoff: Some(HandoffDecision::Complete),
+                        handoff_response,
+                    };
+                }
+                HandoffDecision::Fallback => {
+                    tracing::warn!("핸드오프 게이트 실패 — trim 폴백");
+                    let (trimmed, _) = crate::agent::context::trim_messages(messages, 4);
+                    messages = trimmed;
+                    continue;
+                }
+            }
+        }
+
         let req = ChatRequest {
             model: opts.endpoint.model.clone(),
             messages: messages.clone(),
@@ -152,24 +214,45 @@ pub async fn run_segment(
         if let Some(u) = resp.usage.completion_tokens {
             output_tokens = u;
         }
-        if let Some(c) = &resp.content {
-            final_content.push_str(c);
+
+        // content 가 비면 thinking 모델의 reasoning_content 를 사용자 응답으로 쓴다.
+        let visible = visible_text(&resp);
+
+        if resp.tool_calls.is_empty() {
+            if !visible.trim().is_empty() {
+                final_content = visible.clone();
+            }
+        } else if !visible.trim().is_empty() {
+            final_content.push_str(&visible);
+        }
+
+        if resp.incomplete {
+            tracing::warn!("LLM 응답 incomplete (finish_reason={})", resp.finish_reason);
+            return SegmentResult {
+                status: SegmentStatus::Incomplete,
+                content: final_content,
+                input_tokens,
+                output_tokens,
+                files_touched: registry.files_touched(),
+                depth,
+                handoff: None,
+                handoff_response: None,
+            };
         }
 
         // 가드 적용.
-        if resp.content.as_deref().is_none_or(|c| c.trim().is_empty()) {
+        if visible.trim().is_empty() {
             guard.empty_turns += 1;
         } else {
             guard.empty_turns = 0;
         }
-        let combined = resp.content.clone().unwrap_or_default();
         let outcomes = [
             check_empty_loop(&guard),
-            check_stream_repetition(&combined),
+            check_stream_repetition(&visible),
             check_stuck_signature(&guard),
-            check_fffd_degenerate(&combined),
-            check_build_gate(&guard, &combined),
-            check_pause_summary(&guard, &combined),
+            check_fffd_degenerate(&visible),
+            check_build_gate(&guard, &visible),
+            check_pause_summary(&guard, &visible),
         ];
         for outcome in outcomes {
             if let GuardOutcome::Trigger(reason) = outcome {
@@ -219,56 +302,34 @@ pub async fn run_segment(
             continue;
         }
 
-        // 도구 호출 없음 → 핸드오프 시도 (§4.6).
-        let should_try = should_attempt_handoff(
-            &messages,
-            params.context_tokens,
-            params.handoff_threshold_pct,
-        ) || resp.finish_reason == "stop";
-        if !should_try {
-            // 아직 맥락이 충분하지 않으면 계속 진행.
+        // 도구 호출 없는 비어 있지 않은 텍스트는 완료 후보 (DESIGN.md §4.3).
+        if visible.trim().is_empty() {
+            tracing::warn!(
+                "빈 응답 (finish_reason={}) — 동일 요청 반복 대신 넛지",
+                resp.finish_reason
+            );
+            messages.push(Message {
+                role: "user".to_string(),
+                content: Some(
+                    "이전 응답이 비었습니다. 도구가 필요 없으면 사용자에게 바로 답하세요."
+                        .to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
             continue;
         }
 
-        let (handoff_decision, handoff_response) = attempt_handoff(
-            client,
-            &opts,
-            &params.system_prompt,
-            &params.user_prompt,
-            &messages,
-            &mut depth_guard,
-            params.context_tokens,
-        )
-        .await;
-
-        return match handoff_decision {
-            HandoffDecision::Handoff => SegmentResult {
-                status: SegmentStatus::Completed,
-                content: final_content,
-                input_tokens,
-                output_tokens,
-                files_touched: registry.files_touched(),
-                depth: depth_guard.depth,
-                handoff: Some(HandoffDecision::Handoff),
-                handoff_response,
-            },
-            HandoffDecision::Complete => SegmentResult {
-                status: SegmentStatus::Completed,
-                content: final_content,
-                input_tokens,
-                output_tokens,
-                files_touched: registry.files_touched(),
-                depth: depth_guard.depth,
-                handoff: Some(HandoffDecision::Complete),
-                handoff_response,
-            },
-            HandoffDecision::Fallback => {
-                // 게이트 실패 → trim 폴백으로 현재 세그먼트 계속.
-                tracing::warn!("핸드오프 게이트 실패 — trim 폴백");
-                let (trimmed, _) = crate::agent::context::trim_messages(messages, 4);
-                messages = trimmed;
-                continue;
-            }
+        return SegmentResult {
+            status: SegmentStatus::Completed,
+            content: final_content,
+            input_tokens,
+            output_tokens,
+            files_touched: registry.files_touched(),
+            depth: depth_guard.depth,
+            handoff: Some(HandoffDecision::Complete),
+            handoff_response: None,
         };
     }
 
@@ -286,11 +347,11 @@ pub async fn run_segment(
 }
 
 /// 핸드오프 요청을 시도하고 판정 + 파싱 응답을 반환한다.
+///
+/// 현재 대화(트리밍된 메시지)에 9섹션 지시문을 붙여 도구 없이 요청한다.
 async fn attempt_handoff(
     client: &LlmClient,
     opts: &ChatOptions,
-    system_prompt: &str,
-    user_prompt: &str,
     messages: &[Message],
     depth_guard: &mut HandoffDepthGuard,
     context_tokens: u64,
@@ -300,8 +361,14 @@ async fn attempt_handoff(
         return (HandoffDecision::Fallback, None);
     }
 
-    let _handoff_prompt = build_handoff_prompt();
-    let handoff_msgs = build_handoff_messages(system_prompt, user_prompt);
+    let (mut handoff_msgs, _) = crate::agent::context::trim_messages(messages.to_vec(), 4);
+    handoff_msgs.push(Message {
+        role: "user".to_string(),
+        content: Some(build_handoff_prompt()),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    });
     let req = ChatRequest {
         model: opts.endpoint.model.clone(),
         messages: handoff_msgs,
@@ -313,7 +380,6 @@ async fn attempt_handoff(
         presence_penalty: 0.0,
     };
 
-    // (표현용) 대화 전체 토큰 추정을 조회해 경고 판단.
     let _ = estimate_messages_tokens(messages);
 
     let resp = match client.chat(opts, &req).await {
@@ -336,6 +402,15 @@ async fn attempt_handoff(
     } else {
         (HandoffDecision::Handoff, Some(parsed))
     }
+}
+
+/// 사용자에게 보여줄 텍스트. content 가 비면 reasoning_content 로 대체한다.
+fn visible_text(resp: &crate::llm::ChatResponse) -> String {
+    let content = resp.content.clone().unwrap_or_default();
+    if !content.trim().is_empty() {
+        return content;
+    }
+    resp.reasoning_content.clone().unwrap_or_default()
 }
 
 /// 도구 이름이 상태 변경(파일·bash)인지 판단한다.
@@ -426,7 +501,7 @@ mod tests {
                     "text/event-stream",
                 ),
             )
-            .expect(2)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -436,6 +511,10 @@ mod tests {
         let result = run_segment(&client, &registry, &params, 0).await;
 
         assert_eq!(result.status, SegmentStatus::Completed);
+        assert_eq!(
+            result.handoff,
+            Some(HandoffDecision::Complete)
+        );
     }
 
     #[tokio::test]
@@ -455,7 +534,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_raw(sse_chunk("").as_str(), "text/event-stream"),
             )
-            .expect(2)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -464,8 +543,110 @@ mod tests {
         let params = params(server.uri().as_str(), 1);
         let result = run_segment(&client, &registry, &params, 0).await;
 
-        // max_iterations=1 로 첫 chat 후 도구 없음·핸드오프 시도 → 게이트 실패로 fallback → 루프 종료 → incomplete
+        // max_iterations=1, 빈 응답(완료 후보 아님) → 루프 1회 후 incomplete
         assert_eq!(result.status, SegmentStatus::Incomplete);
+    }
+
+    /// 짧은 인사처럼 도구 없는 텍스트는 핸드오프 없이 바로 완료한다.
+    #[tokio::test]
+    async fn greeting_completes_without_handoff_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    sse_chunk("안녕하세요! 무엇을 도와드릴까요?").as_str(),
+                    "text/event-stream",
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = LlmClient::new();
+        let registry = ToolRegistry::new(false);
+        let mut p = params(server.uri().as_str(), 10);
+        p.context_tokens = 4096;
+        p.user_prompt = "안녕?".to_string();
+        let result = run_segment(&client, &registry, &p, 0).await;
+
+        assert_eq!(result.status, SegmentStatus::Completed);
+        assert_eq!(result.handoff, Some(HandoffDecision::Complete));
+        assert!(result.content.contains("안녕하세요"));
+        assert!(result.handoff_response.is_none());
+    }
+
+    /// content 가 비고 reasoning_content 만 있으면 그걸 완료 응답으로 쓴다.
+    #[tokio::test]
+    async fn reasoning_only_completes_as_reply() {
+        let server = MockServer::start().await;
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {"reasoning_content": "안녕하세요, 도와드리겠습니다."},
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.as_str(), "text/event-stream"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = LlmClient::new();
+        let registry = ToolRegistry::new(false);
+        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0).await;
+        assert_eq!(result.status, SegmentStatus::Completed);
+        assert!(result.content.contains("안녕하세요"));
+    }
+
+    /// 컨텍스트가 이미 임계를 넘으면 본 요청 전에 핸드오프한다.
+    #[tokio::test]
+    async fn handoff_before_request_when_context_full() {
+        let server = MockServer::start().await;
+        let summary = "1. 원 요청/의도\n\
+컨텍스트가 임계를 넘긴 상태에서 핸드오프가 본 요청보다 먼저 일어나는지 검증한다.\n\
+2. 핵심 기술/개념\n\
+토큰 추정과 should_attempt_handoff 트리거, 9섹션 요약 게이트.\n\
+3. 열람·변경 파일: src/agent/loop_.rs 를 열람하고 테스트를 추가한다.\n\
+4. 한 일: 컨텍스트 임계에서 핸드오프를 시도하도록 루프 순서를 고친다.\n\
+5. 실패·수정: 짧은 인사에서 핸드오프가 발동하던 문제를 제거한다.\n\
+6. 현재 진행: 단위 테스트로 임계 초과 경로를 고정한다.\n\
+7. 남은 작업: 후속 세그먼트에서 이어서 진행한다.\n\
+8. 하지 말 것: 임계 미만에서 핸드오프하지 말 것, 테스트 mock 은 본 요청과 혼동하지 말 것.\n\
+9. 다음 한 걸음: NEXT_TASK 의 과제를 실행한다.\n\
+===NEXT_TASK===\n이어서 구현하라";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse_chunk(summary).as_str(), "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = LlmClient::new();
+        let registry = ToolRegistry::new(false);
+        let mut p = params(server.uri().as_str(), 10);
+        p.context_tokens = 100;
+        p.handoff_threshold_pct = 50;
+        // ASCII 4:1 → 400자면 100토큰, 임계 50토큰을 넘긴다.
+        p.user_prompt = "x".repeat(400);
+        let result = run_segment(&client, &registry, &p, 0).await;
+
+        assert_eq!(result.status, SegmentStatus::Completed);
+        assert_eq!(result.handoff, Some(HandoffDecision::Handoff));
+        assert!(result.handoff_response.is_some());
+        assert!(!result
+            .handoff_response
+            .unwrap()
+            .next_task
+            .trim()
+            .is_empty());
     }
 
     #[test]

@@ -100,7 +100,7 @@ pub struct ToolCallFunctionDelta {
 }
 
 /// SSE delta (stream chunk 의 `.choices[0].delta`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Delta {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
@@ -118,6 +118,7 @@ pub struct ChatChunk {
 /// choices[0] 항목.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatChoice {
+    #[serde(default)]
     pub delta: Delta,
     #[serde(default)]
     pub finish_reason: Option<String>,

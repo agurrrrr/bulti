@@ -222,7 +222,6 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     // 클로저(TUI processor)와 chat_loop 가 공유할 변수들.
     let client = LlmClient::new();
     let session_chain = make_uuid();
-    let use_color = !args.no_color && std::io::stdout().is_terminal();
 
     // TUI 모드 진입 (DESIGN.md §4.13.3). `--no-tui` 또는 비-TTY 면 스트림 텍스트로 폴백.
     if !args.no_tui {
@@ -267,7 +266,6 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                 session_id.clone(),
                 turn_count,
                 interrupted_flag.clone(),
-                use_color,
             ))?;
 
             // 턴 종료 시 세션에 기록하고 저장.
@@ -485,13 +483,24 @@ async fn chat_loop(
             session_id.clone(),
             turn,
             interrupted.clone(),
-            use_color,
         )
         .await?;
 
         // interrupted(130) → 대화 종료.
         if turn_result.exit_code == EXIT_INTERRUPTED {
             return Ok(EXIT_INTERRUPTED);
+        }
+
+        // 스트림 텍스트 모드: 턴 결과를 여기서만 stdout 에 출력한다.
+        // TUI 경로는 run_turn 을 직접 호출하지 않고 processor 반환값을 그린다.
+        if !turn_result.assistant_content.trim().is_empty() {
+            let rendered = if use_color {
+                format!("\x1b[36m{}\x1b[0m", turn_result.assistant_content)
+            } else {
+                turn_result.assistant_content.clone()
+            };
+            println!("\n{rendered}");
+            println!();
         }
 
         // 턴 종료 시 세션에 턴을 기록하고 저장 (핸드오프 체인 완료 후).
@@ -535,7 +544,6 @@ pub async fn run_turn(
     session_id: String,
     turn: u32,
     interrupted: Arc<AtomicBool>,
-    use_color: bool,
 ) -> Result<TurnResult, Box<dyn std::error::Error>> {
     let mut depth_guard = HandoffDepthGuard::new();
     let max_depth = cfg.context.max_handoff_depth;
@@ -643,32 +651,26 @@ pub async fn run_turn(
             continue;
         }
 
-        // 최종 응답 출력 (스트림 텍스트 모드). TTY 면 cyan 색상 적용.
-        if !final_content.trim().is_empty() {
-            let rendered = if use_color {
-                format!("\x1b[36m{}\x1b[0m", final_content)
-            } else {
-                final_content.clone()
-            };
-            println!("\n{rendered}");
-            println!();
-        }
-
-        // 상태가 실패·미완료·중단이면 안내.
+        // 상태가 실패·미완료면 안내 문구를 응답에 붙여 호출부(TUI·스트림)가 표시한다.
+        // stdout 직접 출력은 하지 않는다 — TUI raw mode 에서 화면이 깨진다.
         match result.status {
             SegmentStatus::Failed => {
-                println!("(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)");
                 return Ok(TurnResult {
                     exit_code: EXIT_OK,
-                    assistant_content: final_content,
+                    assistant_content: with_status_note(
+                        final_content,
+                        "(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)",
+                    ),
                     files_touched,
                 });
             }
             SegmentStatus::Incomplete => {
-                println!("(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)");
                 return Ok(TurnResult {
                     exit_code: EXIT_OK,
-                    assistant_content: final_content,
+                    assistant_content: with_status_note(
+                        final_content,
+                        "(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)",
+                    ),
                     files_touched,
                 });
             }
@@ -696,6 +698,15 @@ pub async fn run_turn(
             assistant_content: final_content,
             files_touched,
         });
+    }
+}
+
+/// 실패·미완료 안내를 모델 응답 뒤에 붙인다. 응답이 비면 안내만 반환한다.
+fn with_status_note(content: String, note: &str) -> String {
+    if content.trim().is_empty() {
+        note.to_string()
+    } else {
+        format!("{content}\n\n{note}")
     }
 }
 

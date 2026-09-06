@@ -122,6 +122,7 @@ fn handoff_response_with_next_task() -> String {
 }
 
 /// 핸드오프 응답 (NEXT_TASK 없음 → Complete 판정).
+#[allow(dead_code)]
 fn handoff_response_complete() -> String {
     format!("{}\n{}", handoff_summary(), NEXT_TASK_MARKER)
 }
@@ -159,6 +160,7 @@ fn content_chunk() -> serde_json::Value {
 }
 
 /// 핸드오프 요청용 SSE chunk (Complete 판정).
+#[allow(dead_code)]
 fn handoff_complete_chunk() -> serde_json::Value {
     json!({
         "choices": [{
@@ -242,19 +244,18 @@ async fn mount_handoff_response(server: &MockServer, chunk: serde_json::Value) {
 
 /// 전체 파이프라인 e2e 테스트.
 ///
-/// 흐름: endpoint→LLM(SSE)→agent loop→tools→history→handoff→prompt→update.
+/// 흐름: endpoint→LLM(SSE)→agent loop→tools→history.
 /// - 첫 요청: `write_file` 도구 호출 → 파일 생성 (tools 파이프라인).
-/// - 이후 요청: 핸드오프 응답 (Complete) → 체인 완료 (handoff 파이프라인).
+/// - 둘째 요청: 완료 텍스트 → 세그먼트 완료 (컨텍스트 임계 미만이면 핸드오프 없음).
 #[tokio::test]
 async fn full_pipeline_end_to_end() {
     init_test_tracing();
     let server = MockServer::start().await;
 
     // 일반 채팅 요청: 도구 호출 → 내용 출력 순서로 응답.
+    // 짧은 완료 텍스트는 컨텍스트 임계 미만이므로 핸드오프 없이 종료한다.
     mount_tool_response(&server, tool_call_chunk()).await;
     mount_tool_response(&server, content_chunk()).await;
-    // 핸드오프 요청: Complete 판정.
-    mount_handoff_response(&server, handoff_complete_chunk()).await;
 
     // 임시 history DB (격리).
     let (conn, _dir) = temp_history();
@@ -268,8 +269,12 @@ async fn full_pipeline_end_to_end() {
 
     let result = run_segment(&client, &registry, &params, 0).await;
 
-    // 파이프라인 검증: 세그먼트가 완료(handoff Complete)여야 한다.
+    // 파이프라인 검증: 도구 호출 후 완료 텍스트면 세그먼트 완료.
     assert_eq!(result.status, SegmentStatus::Completed);
+    assert_eq!(
+        result.handoff,
+        Some(bulti::agent::handoff::HandoffDecision::Complete)
+    );
     assert!(result.files_touched.contains(&"mock_out.txt".to_string()));
 
     // history 파이프라인: run 종료 기록.
@@ -299,9 +304,7 @@ async fn handoff_prompt_and_parse() {
     init_test_tracing();
     let server = MockServer::start().await;
 
-    // 일반 채팅 요청: 내용 출력 (도구 호출 없음).
-    mount_tool_response(&server, content_chunk()).await;
-    // 핸드오프 요청: NEXT_TASK 있음 → Handoff 판정.
+    // 초기 프롬프트가 이미 임계를 넘으면 본 요청 전에 핸드오프한다.
     mount_handoff_response(&server, handoff_handoff_chunk()).await;
 
     // 핸드오프 프롬프트 조립 검증 (prompt 파이프라인).
@@ -313,7 +316,10 @@ async fn handoff_prompt_and_parse() {
     let registry = test_registry(&cwd);
 
     let client = LlmClient::new();
-    let params = params(&server.uri());
+    let mut params = params(&server.uri());
+    params.handoff_threshold_pct = 75;
+    // ctx=4096, 75% → 3072토큰. ASCII 4:1 이므로 13000자면 3250토큰.
+    params.user_prompt = "x".repeat(13000);
 
     let result = run_segment(&client, &registry, &params, 0).await;
 
@@ -340,8 +346,6 @@ async fn segment_completes_without_handoff_next_task() {
         "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
     });
     mount_tool_response(&server, plain_chunk).await;
-    // 핸드오프 요청: NEXT_TASK 없음 → Complete 판정.
-    mount_handoff_response(&server, handoff_complete_chunk()).await;
 
     let cwd = std::env::temp_dir();
     let registry = test_registry(&cwd);
@@ -351,6 +355,10 @@ async fn segment_completes_without_handoff_next_task() {
 
     let result = run_segment(&client, &registry, &params, 0).await;
     assert_eq!(result.status, SegmentStatus::Completed);
+    assert_eq!(
+        result.handoff,
+        Some(bulti::agent::handoff::HandoffDecision::Complete)
+    );
     assert!(result.content.contains("완료"));
 }
 
@@ -482,11 +490,9 @@ async fn chat_turn_end_to_end() {
     init_test_tracing();
     let server = MockServer::start().await;
 
-    // 도구 호출 → 내용 출력 순서로 응답 (단발 run 과 동일 매처).
+    // 도구 호출 → 내용 출력. 짧은 완료는 핸드오프 없이 턴 종료.
     mount_tool_response(&server, tool_call_chunk()).await;
     mount_tool_response(&server, content_chunk()).await;
-    // 핸드오프 요청: Complete 판정 (체인 완료).
-    mount_handoff_response(&server, handoff_complete_chunk()).await;
 
     // 임시 history DB (격리).
     let (conn, _dir) = temp_history();
@@ -525,7 +531,6 @@ async fn chat_turn_end_to_end() {
         "sess-1".to_string(),
         0,
         interrupted,
-        false,
     )
     .await
     .unwrap();
