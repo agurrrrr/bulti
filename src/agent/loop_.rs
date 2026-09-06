@@ -11,9 +11,9 @@
 //! 결과에는 content / usage / files_touched / depth 와 핸드오프 판정을 포함한다.
 
 use crate::agent::guards::{
-    check_build_gate, check_empty_loop, check_fffd_degenerate, check_future_intention,
-    check_pause_summary, check_stream_repetition, check_stuck_signature, update_after_tool_call,
-    GuardContext, GuardOutcome,
+    check_build_gate, check_empty_loop, check_fffd_degenerate, check_pause_summary,
+    check_stream_repetition, check_stuck_signature, update_after_tool_call, GuardContext,
+    GuardOutcome,
 };
 use crate::agent::handoff::{
     build_handoff_messages, build_handoff_prompt, handoff_max_tokens, is_handoff_summary_acceptable,
@@ -168,7 +168,6 @@ pub async fn run_segment(
             check_stream_repetition(&combined),
             check_stuck_signature(&guard),
             check_fffd_degenerate(&combined),
-            check_future_intention(&guard, resp.tool_calls.len(), &combined),
             check_build_gate(&guard, &combined),
             check_pause_summary(&guard, &combined),
         ];

@@ -19,12 +19,8 @@ pub struct GuardContext {
     pub empty_turns: u32,
     /// 직전 tool-call 시그니처들 (최근 4개).
     pub recent_signatures: Vec<String>,
-    /// future-intention nudge 횟수.
-    pub future_nudges: u32,
     /// pause-summary nudge 횟수.
     pub pause_nudges: u32,
-    /// 상태 변경 도구 호출 여부 (future-intention 리셋용).
-    pub state_change_called: bool,
     /// 코드 수정 도구 호출 여부 (build gate용).
     pub code_modified: bool,
     /// bash 도구 호출 여부 (build gate용).
@@ -102,39 +98,6 @@ pub fn check_fffd_degenerate(content: &str) -> GuardOutcome {
     }
 }
 
-/// future-intention nudge 가드 (DESIGN.md §5, #6290/#6294).
-///
-/// 도구 호출 0 + "~하겠습니다/let me ~" 문장 종결이면 완료 대신 nudge, 상한 2회.
-/// 상태 변경 도구 호출 시 리셋.
-pub fn check_future_intention(ctx: &GuardContext, tool_calls: usize, text: &str) -> GuardOutcome {
-    if tool_calls == 0 && is_future_intention(text) {
-        // 상태 변경 도구 호출 시 리셋
-        let nudges = if ctx.state_change_called { 0 } else { ctx.future_nudges };
-        if nudges >= 2 {
-            return GuardOutcome::Trigger("incomplete: future intention nudge limit".to_string());
-        }
-        return GuardOutcome::Trigger("nudge: future intention".to_string());
-    }
-    GuardOutcome::Pass
-}
-
-fn is_future_intention(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    // "~하겠습니다" 패턴
-    if t.contains("하겠습니다") || t.contains("하겠어요") || t.contains("할게요") {
-        return true;
-    }
-    // "let me ~" / "I will ~" 패턴
-    if t.contains("let me") || t.contains("i will") || t.contains("i'll") {
-        return true;
-    }
-    // 미래 의도 문장 종결 (마침표/줄바꿈으로 끝나고 행동 예고)
-    if (t.ends_with('.') || t.ends_with('\n')) && (t.contains("will") || t.contains("going to")) {
-        return true;
-    }
-    false
-}
-
 /// build gate 가드 (DESIGN.md §5, #6294).
 ///
 /// 코드 수정했고 최종 메시지가 빌드 언급 + bash 미호출이면 incomplete
@@ -182,10 +145,7 @@ pub fn update_after_tool_call(ctx: &mut GuardContext, sig: String, is_state_chan
     if ctx.recent_signatures.len() > 4 {
         ctx.recent_signatures.remove(0);
     }
-    if is_state_change {
-        ctx.state_change_called = true;
-        ctx.future_nudges = 0;
-    }
+    let _ = is_state_change;
 }
 
 #[cfg(test)]
@@ -288,45 +248,6 @@ mod tests {
         assert_eq!(check_fffd_degenerate(content), GuardOutcome::Pass);
     }
 
-    // ── future-intention nudge (#6290/#6294) ──
-
-    #[test]
-    fn future_intention_positive_korean() {
-        let ctx = GuardContext::default();
-        let r = check_future_intention(&ctx, 0, "코드를 수정하겠습니다.");
-        assert!(matches!(r, GuardOutcome::Trigger(_)));
-    }
-
-    #[test]
-    fn future_intention_positive_english() {
-        let ctx = GuardContext::default();
-        let r = check_future_intention(&ctx, 0, "Let me fix the bug.");
-        assert!(matches!(r, GuardOutcome::Trigger(_)));
-    }
-
-    #[test]
-    fn future_intention_negative_with_tool_call() {
-        let ctx = GuardContext::default();
-        // 도구 호출이 있으면 nudge 아님
-        assert_eq!(check_future_intention(&ctx, 1, "코드를 수정하겠습니다."), GuardOutcome::Pass);
-    }
-
-    #[test]
-    fn future_intention_negative_no_intent() {
-        let ctx = GuardContext::default();
-        assert_eq!(check_future_intention(&ctx, 0, "완료되었습니다."), GuardOutcome::Pass);
-    }
-
-    #[test]
-    fn future_intention_positive_limit_2() {
-        let ctx = GuardContext {
-            future_nudges: 2,
-            ..GuardContext::default()
-        };
-        let r = check_future_intention(&ctx, 0, "수정하겠습니다.");
-        assert!(matches!(r, GuardOutcome::Trigger(_)));
-    }
-
     // ── build gate (#6294) ──
 
     #[test]
@@ -406,17 +327,6 @@ mod tests {
         update_after_tool_call(&mut ctx, "bash:ls".to_string(), false);
         assert_eq!(ctx.recent_signatures.len(), 4);
         assert!(matches!(check_stuck_signature(&ctx), GuardOutcome::Trigger(_)));
-    }
-
-    #[test]
-    fn update_after_tool_call_resets_future_on_state_change() {
-        let mut ctx = GuardContext {
-            future_nudges: 2,
-            ..GuardContext::default()
-        };
-        update_after_tool_call(&mut ctx, "write_file:x".to_string(), true);
-        assert_eq!(ctx.future_nudges, 0);
-        assert!(ctx.state_change_called);
     }
 
     #[test]
