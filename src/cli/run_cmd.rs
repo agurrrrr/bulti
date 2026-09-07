@@ -246,7 +246,7 @@ async fn run_chain(
             );
         }
 
-        let result = run_segment(&client, registry.as_ref(), &params, depth_guard.depth).await;
+        let result = run_segment(&client, registry.as_ref(), &params, depth_guard.depth, None).await;
 
         // files_touched 집계.
         for f in registry.files_touched() {

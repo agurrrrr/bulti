@@ -212,38 +212,72 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         cfg.mcp.clone(),
         mcp_manager,
     );
-    let conn = history::open().map_err(|e| e.to_string())?;
+    let conn = Arc::new(std::sync::Mutex::new(
+        history::open().map_err(|e| e.to_string())?,
+    ));
 
     // SIGINT 감시 태스크 (Ctrl+C → interrupted).
     let interrupted_flag = Arc::new(AtomicBool::new(false));
     spawn_sigint_watcher(interrupted_flag.clone());
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let rt = Arc::new(tokio::runtime::Runtime::new().map_err(|e| e.to_string())?);
 
     // 클로저(TUI processor)와 chat_loop 가 공유할 변수들.
     let client = LlmClient::new();
     let session_chain = make_uuid();
 
+    // TUI processor 는 별도 스레드에서 실행되므로 `Send + 'static` 이 요구된다.
+    // 세션·재개 컨텍스트·DB·runtime 을 스레드와 공유하기 위해 Arc<Mutex<>> 로 감싼다.
+    let session_shared = Arc::new(std::sync::Mutex::new(session));
+    let resume_shared = Arc::new(std::sync::Mutex::new(resume_context));
+
     // TUI 모드 진입 (DESIGN.md §4.13.3). `--no-tui` 또는 비-TTY 면 스트림 텍스트로 폴백.
     if !args.no_tui {
         // TTY 가 아니면 TUI 는 None 을 반환 → 스트림 텍스트 모드.
-        let initial_lines = build_initial_lines(&session);
+        let initial_lines = {
+            let s = session_shared.lock().unwrap();
+            build_initial_lines(&s)
+        };
         let options = crate::tui::TuiOptions {
             endpoint_name: endpoint_name.clone(),
             model: endpoint.model.clone(),
             session_id: session_id.clone(),
         };
+        let mut turn_count = {
+            let s = session_shared.lock().unwrap();
+            s.turns.len() as u32
+        };
 
         // TUI processor: 사용자 메시지 → 한 턴(세그먼트 체인) 실행 → TurnResult 반환.
-        let mut turn_count = session.turns.len() as u32;
-        let processor = |user_msg: String| -> Result<TurnResult, Box<dyn std::error::Error>> {
+        // 별도 스레드에서 실행되므로 `Send + 'static` 이 요구되고, run_tui 의 `F: Clone`
+        // 바운드 때문에 클로저가 Clone 되어야 한다. move 클로저에 넣을 Arc clone 을
+        // 따로 만들어 원본 변수는 이후 코드(스트림 텍스트 폴백)에서 그대로 쓰도록 한다.
+        let cfg_owned = cfg.clone();
+        let endpoint_owned = endpoint.clone();
+        let endpoint_name_owned = endpoint_name.clone();
+        let system_prompt_owned = system_prompt.clone();
+        let session_id_owned = session_id.clone();
+        let session_chain_owned = session_chain.clone();
+        let client_tui = client.clone();
+        let registry_tui = registry.clone();
+        let conn_tui = conn.clone();
+        let rt_tui = rt.clone();
+        let session_tui = session_shared.clone();
+        let resume_tui = resume_shared.clone();
+        let interrupted_tui = interrupted_flag.clone();
+        let processor = move |user_msg: String,
+                              delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
+              -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
             // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
-            let effective_prompt = match resume_context.take() {
+            let effective_prompt = match resume_tui.lock().unwrap().take() {
                 Some(ctx) if !ctx.trim().is_empty() => {
                     format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
                 }
                 _ => {
-                    let ctx = session.conversation_context();
+                    let ctx = {
+                        let s = session_tui.lock().unwrap();
+                        s.conversation_context()
+                    };
                     if ctx.trim().is_empty() {
                         user_msg.clone()
                     } else {
@@ -253,31 +287,39 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             };
 
             let chain_id = make_uuid();
-            let turn_result = rt.block_on(run_turn(
-                &client,
-                &conn,
-                &registry,
-                &system_prompt,
-                effective_prompt,
-                &endpoint,
-                &endpoint_name,
-                cfg,
-                &chain_id,
-                &session_chain,
-                session_id.clone(),
-                turn_count,
-                interrupted_flag.clone(),
-            ))?;
+            let turn_result = {
+                let conn_guard = conn_tui.lock().unwrap();
+                rt_tui.block_on(run_turn(
+                    &client_tui,
+                    &conn_guard,
+                    &registry_tui,
+                    &system_prompt_owned,
+                    effective_prompt,
+                    &endpoint_owned,
+                    &endpoint_name_owned,
+                    &cfg_owned,
+                    &chain_id,
+                    &session_chain_owned,
+                    session_id_owned.clone(),
+                    turn_count,
+                    interrupted_tui.clone(),
+                    Some(delta_tx),
+                ))
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()).into()
+                })?
+            };
 
             // 턴 종료 시 세션에 기록하고 저장.
-            session.push_turn(session::TurnRecord {
+            let mut s = session_tui.lock().unwrap();
+            s.push_turn(session::TurnRecord {
                 turn: turn_count,
                 user: user_msg.clone(),
                 assistant: turn_result.assistant_content.clone(),
                 chain_id: chain_id.clone(),
                 files_touched: turn_result.files_touched.clone(),
             });
-            if let Err(e) = session::save(&session) {
+            if let Err(e) = session::save(&s) {
                 tracing::error!("세션 저장 실패: {e}");
             }
             turn_count += 1;
@@ -290,20 +332,25 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         }
     }
 
-    let outcome = rt.block_on(chat_loop(
-        &conn,
-        &registry,
-        &system_prompt,
-        &endpoint,
-        &endpoint_name,
-        cfg,
-        &args,
-        interrupted_flag,
-        args.first.clone(),
-        &mut session_id,
-        &mut session,
-        &mut resume_context,
-    ))?;
+    let outcome = {
+        let conn_guard = conn.lock().unwrap();
+        let mut session_guard = session_shared.lock().unwrap();
+        let mut resume_guard = resume_shared.lock().unwrap();
+        rt.block_on(chat_loop(
+            &conn_guard,
+            &registry,
+            &system_prompt,
+            &endpoint,
+            &endpoint_name,
+            cfg,
+            &args,
+            interrupted_flag,
+            args.first.clone(),
+            &mut session_id,
+            &mut *session_guard,
+            &mut *resume_guard,
+        ))?
+    };
 
     Ok(outcome)
 }
@@ -486,6 +533,7 @@ async fn chat_loop(
             session_id.clone(),
             turn,
             interrupted.clone(),
+            None,
         )
         .await?;
 
@@ -539,6 +587,7 @@ pub async fn run_turn(
     session_id: String,
     turn: u32,
     interrupted: Arc<AtomicBool>,
+    delta_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>>,
 ) -> Result<TurnResult, Box<dyn std::error::Error>> {
     let mut depth_guard = HandoffDepthGuard::new();
     let max_depth = cfg.context.max_handoff_depth;
@@ -599,7 +648,7 @@ pub async fn run_turn(
         run_ids.push(run_id);
         parent_run_id = Some(run_id);
 
-        let result = run_segment(client, registry.as_ref(), &params, depth_guard.depth).await;
+        let result = run_segment(client, registry.as_ref(), &params, depth_guard.depth, delta_tx.clone()).await;
 
         // files_touched 집계.
         for f in registry.files_touched() {

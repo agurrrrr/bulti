@@ -171,6 +171,7 @@ pub struct ChatOptions {
 const MAX_TOOLCALL_ARGS: usize = 64 * 1024;
 
 /// SSE 스트리밍 클라이언트 (DESIGN.md §4.2).
+#[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
     timeout: Duration,
@@ -186,10 +187,14 @@ impl LlmClient {
     }
 
     /// 스트리밍 채팅 완료를 실행한다.
+    ///
+    /// `delta_tx` 가 주어지면 도착하는 각 SSE 델타를 채널로 전송한다 (TUI 점진적
+    /// 렌더링용). `None` 이면 기존처럼 최종 `ChatResponse` 만 누적·반환한다.
     pub async fn chat(
         &self,
         opts: &ChatOptions,
         request: &ChatRequest,
+        delta_tx: Option<tokio::sync::mpsc::UnboundedSender<Delta>>,
     ) -> Result<ChatResponse, LlmError> {
         let url = format!(
             "{}/chat/completions",
@@ -239,6 +244,13 @@ impl LlmClient {
 
             let chunk: ChatChunk =
                 serde_json::from_str(&event.data).map_err(|e| LlmError::Json(e.to_string()))?;
+
+            // TUI 점진적 렌더링용: 파싱된 델타를 채널로 전송한다.
+            if let (Some(tx), Some(choices)) = (&delta_tx, &chunk.choices) {
+                if let Some(choice) = choices.first() {
+                    let _ = tx.send(choice.delta.clone());
+                }
+            }
 
             if let Some(u) = chunk.usage {
                 usage = u;
@@ -431,7 +443,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         assert_eq!(resp.content.as_deref(), Some("안녕하세요"));
         assert_eq!(resp.finish_reason, "stop");
         assert!(!resp.incomplete);
@@ -496,7 +508,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         assert_eq!(resp.finish_reason, "tool_calls");
         assert!(!resp.incomplete);
         assert_eq!(resp.tool_calls.len(), 2);
@@ -551,7 +563,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         // reasoning_content 는 content 와 분리되어 누적된다.
         assert_eq!(resp.content.as_deref(), Some("답"));
         assert_eq!(resp.reasoning_content.as_deref(), Some("생각 더 하기"));
@@ -585,7 +597,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let err = client.chat(&opts, &req).await.unwrap_err();
+        let err = client.chat(&opts, &req, None).await.unwrap_err();
         match err {
             LlmError::Api { status, body } => {
                 assert_eq!(status, 400);
@@ -613,7 +625,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let err = client.chat(&opts, &req).await.unwrap_err();
+        let err = client.chat(&opts, &req, None).await.unwrap_err();
         match err {
             LlmError::Network(_) => {}
             other => panic!("예상치 못한 오류: {other:?}"),
@@ -649,7 +661,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         assert_eq!(resp.finish_reason, "length");
         assert!(resp.incomplete);
         assert!(resp.content.is_none());
@@ -682,7 +694,7 @@ mod tests {
             presence_penalty: 0.3,
         };
 
-        let err = client.chat(&opts, &req).await.unwrap_err();
+        let err = client.chat(&opts, &req, None).await.unwrap_err();
         match err {
             LlmError::Empty => {}
             other => panic!("예상치 못한 오류: {other:?}"),

@@ -15,6 +15,7 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -105,17 +106,23 @@ impl Drop for TerminalGuard {
 /// TUI 채팅 인터페이스를 실행한다. TTY 가 아니면 `None` 을 반환해 호출부가
 /// 스트림 텍스트 모드로 대화하게 한다.
 ///
-/// `processor` 는 사용자 메시지를 받아 한 턴(세그먼트 체인)을 실행하고
-/// `TurnResult` 를 반환하는 클로저다. TUI 루프는 Enter 로 메시지를
-/// 전송할 때마다 processor 를 호출해 응답·생각·토큰·속도를 대화 리스트에
-/// 추가한다.
+/// `processor` 는 사용자 메시지와 델타 전송 채널을 받아 한 턴(세그먼트 체인)을
+/// 실행하고 `TurnResult` 를 반환하는 클로저다. TUI 루프는 Enter 로 메시지를
+/// 전송할 때마다 processor 를 호출하고, 채널로 도착하는 중간 델타를 받아
+/// 화면에 점진적으로 그린 뒤 최종 `TurnResult` 를 대화 리스트에 추가한다.
 pub fn run_tui<F>(
     options: &TuiOptions,
     initial_lines: Vec<ChatLine>,
-    mut processor: F,
+    processor: F,
 ) -> Result<Option<TuiOutcome>, Box<dyn std::error::Error>>
 where
-    F: FnMut(String) -> Result<TurnResult, Box<dyn std::error::Error>>,
+    F: FnMut(
+            String,
+            tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>,
+        ) -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>>
+        + Send
+        + Clone
+        + 'static,
 {
     if !io::stdout().is_terminal() {
         return Ok(None);
@@ -135,7 +142,40 @@ where
     let mut offset_from_bottom: usize = 0;
     let mut saved = false;
 
+    // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
+    // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
+    let mut pending_turn: Option<(
+        tokio::sync::mpsc::UnboundedReceiver<crate::llm::Delta>,
+        JoinHandle<Result<TurnResult, Box<dyn std::error::Error + Send + Sync>>>,
+    )> = None;
+
     let outcome = loop {
+        // 진행 중 턴의 델타를 폴링해 화면에 점진적으로 반영한다.
+        // 마지막 Assistant 메시지(생성 중)에 content 를 누적한다.
+        if let Some((ref mut rx, _)) = pending_turn {
+            let mut got = false;
+            while let Ok(delta) = rx.try_recv() {
+                got = true;
+                if let Some(text) = delta.content {
+                    if let Some(last) = lines.last_mut() {
+                        if last.role == Role::Assistant {
+                            last.text.push_str(&text);
+                        }
+                    }
+                }
+                if let Some(think) = delta.reasoning_content {
+                    if let Some(last) = lines.last_mut() {
+                        if last.role == Role::Assistant {
+                            last.reasoning_content.push_str(&think);
+                        }
+                    }
+                }
+            }
+            if got {
+                offset_from_bottom = 0;
+            }
+        }
+
         terminal.draw(|f| {
             let size = f.area();
             let chunks = Layout::default()
@@ -153,6 +193,37 @@ where
             draw_input(f, chunks[2], &input);
             draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
         })?;
+
+        // 진행 중 턴이 끝났는지 확인한다. 끝났으면 최종 결과를 처리한다.
+        if let Some((_, handle)) = pending_turn.take() {
+            match handle.join() {
+                Ok(Ok(turn)) => {
+                    lines.push(ChatLine {
+                        role: Role::Assistant,
+                        text: turn.assistant_content.clone(),
+                        reasoning_content: turn.reasoning_content.clone(),
+                        input_tokens: turn.input_tokens,
+                        output_tokens: turn.output_tokens,
+                        duration_ms: turn.duration_ms,
+                    });
+                }
+                Ok(Err(e)) => {
+                    lines.push(ChatLine {
+                        role: Role::Status,
+                        text: format!("오류: {e}"),
+                        ..ChatLine::default()
+                    });
+                }
+                Err(_) => {
+                    lines.push(ChatLine {
+                        role: Role::Status,
+                        text: "오류: 턴 실행 스레드가 종료되었습니다".to_string(),
+                        ..ChatLine::default()
+                    });
+                }
+            }
+            offset_from_bottom = 0;
+        }
 
         if !event::poll(Duration::from_millis(200))? {
             continue;
@@ -194,6 +265,10 @@ where
                 offset_from_bottom = 0;
             }
             KeyCode::Enter => {
+                // 진행 중 턴이 있으면 무시한다 (한 번에 한 턴).
+                if pending_turn.is_some() {
+                    continue;
+                }
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
                     continue;
@@ -204,52 +279,26 @@ where
                     text: trimmed.clone(),
                     ..ChatLine::default()
                 });
-                // 응답 생성 중 상태를 표시한다. processor 는 동기 실행되므로
-                // reasoning 은 완료 후 접힌 채 저장된다.
+                // 응답 생성 중 상태: 빈 Assistant 메시지를 미리 추가해, 도착하는
+                // 델타가 이 메시지에 점진적으로 누적되게 한다.
                 lines.push(ChatLine {
-                    role: Role::Status,
-                    text: "응답 생성 중...".to_string(),
+                    role: Role::Assistant,
+                    text: String::new(),
+                    reasoning_content: String::new(),
                     ..ChatLine::default()
                 });
-                terminal.draw(|f| {
-                    let size = f.area();
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Min(3),
-                            Constraint::Length(3),
-                            Constraint::Length(1),
-                        ])
-                        .split(size);
-                    draw_title(f, chunks[0], &options.endpoint_name, &options.model);
-                    draw_scroll(f, chunks[1], &lines, 0);
-                    draw_input(f, chunks[2], &input);
-                    draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
-                })?;
-
-                let response = processor(trimmed);
-                let _ = lines.pop(); // "응답 생성 중..."
-                match response {
-                    Ok(turn) => {
-                        lines.push(ChatLine {
-                            role: Role::Assistant,
-                            text: turn.assistant_content.clone(),
-                            reasoning_content: turn.reasoning_content.clone(),
-                            input_tokens: turn.input_tokens,
-                            output_tokens: turn.output_tokens,
-                            duration_ms: turn.duration_ms,
-                        });
-                    }
-                    Err(e) => {
-                        lines.push(ChatLine {
-                            role: Role::Status,
-                            text: format!("오류: {e}"),
-                            ..ChatLine::default()
-                        });
-                    }
-                }
                 offset_from_bottom = 0;
+
+                // 델타 채널을 만들고 processor 를 별도 스레드로 실행한다.
+                // 스트리밍 중에도 TUI 루프가 화면을 갱신할 수 있어야 하므로
+                // 동기 호출 대신 스레드 실행이 필요하다.
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let msg = trimmed.clone();
+                let handle = std::thread::spawn({
+                    let mut processor = processor.clone();
+                    move || processor(msg, tx)
+                });
+                pending_turn = Some((rx, handle));
             }
             KeyCode::Backspace => {
                 input.pop();
@@ -445,7 +494,7 @@ mod tests {
             model: "model".to_string(),
             session_id: "sid".to_string(),
         };
-        let result = run_tui(&options, vec![], |_| {
+        let result = run_tui(&options, vec![], |_msg, _tx| {
             Ok(TurnResult {
                 exit_code: 0,
                 assistant_content: "ok".to_string(),

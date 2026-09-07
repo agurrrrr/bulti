@@ -267,7 +267,7 @@ async fn full_pipeline_end_to_end() {
     let client = LlmClient::new();
     let params = params(&server.uri());
 
-    let result = run_segment(&client, &registry, &params, 0).await;
+    let result = run_segment(&client, &registry, &params, 0, None).await;
 
     // 파이프라인 검증: 도구 호출 후 완료 텍스트면 세그먼트 완료.
     assert_eq!(result.status, SegmentStatus::Completed);
@@ -321,7 +321,7 @@ async fn handoff_prompt_and_parse() {
     // ctx=4096, 75% → 3072토큰. ASCII 4:1 이므로 13000자면 3250토큰.
     params.user_prompt = "x".repeat(13000);
 
-    let result = run_segment(&client, &registry, &params, 0).await;
+    let result = run_segment(&client, &registry, &params, 0, None).await;
 
     // NEXT_TASK 있음 → Handoff 판정.
     assert_eq!(result.status, SegmentStatus::Completed);
@@ -353,7 +353,7 @@ async fn segment_completes_without_handoff_next_task() {
     let client = LlmClient::new();
     let params = params(&server.uri());
 
-    let result = run_segment(&client, &registry, &params, 0).await;
+    let result = run_segment(&client, &registry, &params, 0, None).await;
     assert_eq!(result.status, SegmentStatus::Completed);
     assert_eq!(
         result.handoff,
@@ -445,7 +445,7 @@ async fn full_pipeline_real_llm() {
         handoff_warn_depth: 8,
     };
 
-    let result = run_segment(&client, &registry, &params, 0).await;
+    let result = run_segment(&client, &registry, &params, 0, None).await;
 
     // 실제 LLM 파이프라인 검증: 도구 호출(write_file)이 수행되어야 한다.
     assert_eq!(result.status, SegmentStatus::Completed);
@@ -531,6 +531,7 @@ async fn chat_turn_end_to_end() {
         "sess-1".to_string(),
         0,
         interrupted,
+        None,
     )
     .await
     .unwrap();

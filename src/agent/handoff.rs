@@ -577,7 +577,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
         };
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
 
         // ── 파싱 ──
@@ -647,7 +647,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
         };
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
 
         let parsed = parse_handoff_response(&content);
@@ -714,7 +714,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
         };
-        let resp = client.chat(&opts, &req).await.unwrap();
+        let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
 
         let parsed = parse_handoff_response(&content);

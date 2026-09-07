@@ -88,6 +88,7 @@ pub async fn run_segment(
     registry: &ToolRegistry,
     params: &SegmentParams,
     depth: u32,
+    delta_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>>,
 ) -> SegmentResult {
     let mut messages = vec![
         Message {
@@ -195,7 +196,7 @@ pub async fn run_segment(
             presence_penalty: 0.0,
         };
 
-        let resp = match client.chat(&opts, &req).await {
+        let resp = match client.chat(&opts, &req, delta_tx.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("LLM 오류: {e}");
@@ -399,7 +400,7 @@ async fn attempt_handoff(
 
     let _ = estimate_messages_tokens(messages);
 
-    let resp = match client.chat(opts, &req).await {
+    let resp = match client.chat(opts, &req, None).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("핸드오프 요청 오류: {e}");
@@ -525,7 +526,7 @@ mod tests {
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
         let params = params(server.uri().as_str(), 100);
-        let result = run_segment(&client, &registry, &params, 0).await;
+        let result = run_segment(&client, &registry, &params, 0, None).await;
 
         assert_eq!(result.status, SegmentStatus::Completed);
         assert_eq!(
@@ -539,7 +540,7 @@ mod tests {
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
         let params = params("http://127.0.0.1:1/v1", 100);
-        let result = run_segment(&client, &registry, &params, 0).await;
+        let result = run_segment(&client, &registry, &params, 0, None).await;
         assert_eq!(result.status, SegmentStatus::Failed);
     }
 
@@ -558,7 +559,7 @@ mod tests {
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
         let params = params(server.uri().as_str(), 1);
-        let result = run_segment(&client, &registry, &params, 0).await;
+        let result = run_segment(&client, &registry, &params, 0, None).await;
 
         // max_iterations=1, 빈 응답(완료 후보 아님) → 루프 1회 후 incomplete
         assert_eq!(result.status, SegmentStatus::Incomplete);
@@ -585,7 +586,7 @@ mod tests {
         let mut p = params(server.uri().as_str(), 10);
         p.context_tokens = 4096;
         p.user_prompt = "안녕?".to_string();
-        let result = run_segment(&client, &registry, &p, 0).await;
+        let result = run_segment(&client, &registry, &p, 0, None).await;
 
         assert_eq!(result.status, SegmentStatus::Completed);
         assert_eq!(result.handoff, Some(HandoffDecision::Complete));
@@ -615,7 +616,7 @@ mod tests {
 
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
-        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0).await;
+        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0, None).await;
         assert_eq!(result.status, SegmentStatus::Completed);
         assert!(result.content.contains("안녕하세요"));
     }
@@ -653,7 +654,7 @@ mod tests {
         p.handoff_threshold_pct = 50;
         // ASCII 4:1 → 400자면 100토큰, 임계 50토큰을 넘긴다.
         p.user_prompt = "x".repeat(400);
-        let result = run_segment(&client, &registry, &p, 0).await;
+        let result = run_segment(&client, &registry, &p, 0, None).await;
 
         assert_eq!(result.status, SegmentStatus::Completed);
         assert_eq!(result.handoff, Some(HandoffDecision::Handoff));
