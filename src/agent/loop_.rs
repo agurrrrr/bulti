@@ -54,6 +54,7 @@ impl SegmentStatus {
 pub struct SegmentResult {
     pub status: SegmentStatus,
     pub content: String,
+    pub reasoning_content: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub files_touched: Vec<String>,
@@ -115,6 +116,7 @@ pub async fn run_segment(
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
     let mut final_content = String::new();
+    let mut final_reasoning = String::new();
     let mut depth_guard = HandoffDepthGuard { depth };
 
     for _ in 0..params.max_iterations {
@@ -129,6 +131,7 @@ pub async fn run_segment(
                 return SegmentResult {
                     status: SegmentStatus::Incomplete,
                     content: final_content,
+                    reasoning_content: final_reasoning.clone(),
                     input_tokens,
                     output_tokens,
                     files_touched: registry.files_touched(),
@@ -150,6 +153,7 @@ pub async fn run_segment(
                     return SegmentResult {
                         status: SegmentStatus::Completed,
                         content: final_content,
+                        reasoning_content: final_reasoning.clone(),
                         input_tokens,
                         output_tokens,
                         files_touched: registry.files_touched(),
@@ -162,6 +166,7 @@ pub async fn run_segment(
                     return SegmentResult {
                         status: SegmentStatus::Completed,
                         content: final_content,
+                        reasoning_content: final_reasoning.clone(),
                         input_tokens,
                         output_tokens,
                         files_touched: registry.files_touched(),
@@ -197,6 +202,7 @@ pub async fn run_segment(
                 return SegmentResult {
                     status: SegmentStatus::Failed,
                     content: final_content,
+                    reasoning_content: final_reasoning.clone(),
                     input_tokens,
                     output_tokens,
                     files_touched: registry.files_touched(),
@@ -218,6 +224,13 @@ pub async fn run_segment(
         // content 가 비면 thinking 모델의 reasoning_content 를 사용자 응답으로 쓴다.
         let visible = visible_text(&resp);
 
+        // reasoning 수집 (TUI 에서 모델 생각 표시용).
+        if let Some(r) = &resp.reasoning_content {
+            if !r.trim().is_empty() {
+                final_reasoning.push_str(r);
+            }
+        }
+
         if resp.tool_calls.is_empty() {
             if !visible.trim().is_empty() {
                 final_content = visible.clone();
@@ -231,6 +244,7 @@ pub async fn run_segment(
             return SegmentResult {
                 status: SegmentStatus::Incomplete,
                 content: final_content,
+                reasoning_content: final_reasoning.clone(),
                 input_tokens,
                 output_tokens,
                 files_touched: registry.files_touched(),
@@ -260,6 +274,7 @@ pub async fn run_segment(
                 return SegmentResult {
                     status: SegmentStatus::Incomplete,
                     content: final_content,
+                    reasoning_content: final_reasoning.clone(),
                     input_tokens,
                     output_tokens,
                     files_touched: registry.files_touched(),
@@ -324,6 +339,7 @@ pub async fn run_segment(
         return SegmentResult {
             status: SegmentStatus::Completed,
             content: final_content,
+            reasoning_content: final_reasoning.clone(),
             input_tokens,
             output_tokens,
             files_touched: registry.files_touched(),
@@ -337,6 +353,7 @@ pub async fn run_segment(
     SegmentResult {
         status: SegmentStatus::Incomplete,
         content: final_content,
+        reasoning_content: final_reasoning.clone(),
         input_tokens,
         output_tokens,
         files_touched: registry.files_touched(),

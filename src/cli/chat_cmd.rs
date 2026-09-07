@@ -27,6 +27,7 @@ use crate::history;
 use crate::llm::LlmClient;
 use crate::mcp::McpManager;
 use crate::session;
+use crate::tui::TurnResult;
 
 /// exit code 매핑 (run 과 동일 규약 재사용).
 const EXIT_OK: i32 = 0;
@@ -233,9 +234,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             session_id: session_id.clone(),
         };
 
-        // TUI processor: 사용자 메시지 → 한 턴(세그먼트 체인) 실행 → 모델 응답 반환.
+        // TUI processor: 사용자 메시지 → 한 턴(세그먼트 체인) 실행 → TurnResult 반환.
         let mut turn_count = session.turns.len() as u32;
-        let processor = |user_msg: String| -> Result<String, Box<dyn std::error::Error>> {
+        let processor = |user_msg: String| -> Result<TurnResult, Box<dyn std::error::Error>> {
             // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
             let effective_prompt = match resume_context.take() {
                 Some(ctx) if !ctx.trim().is_empty() => {
@@ -280,7 +281,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                 tracing::error!("세션 저장 실패: {e}");
             }
             turn_count += 1;
-            Ok(turn_result.assistant_content)
+            Ok(turn_result)
         };
 
         let tui_outcome = crate::tui::run_tui(&options, initial_lines, processor)?;
@@ -315,10 +316,12 @@ fn build_initial_lines(session: &session::Session) -> Vec<crate::tui::ChatLine> 
         lines.push(ChatLine {
             role: Role::User,
             text: t.user.clone(),
+            ..ChatLine::default()
         });
         lines.push(ChatLine {
             role: Role::Assistant,
             text: t.assistant.clone(),
+            ..ChatLine::default()
         });
     }
     lines
@@ -519,14 +522,6 @@ async fn chat_loop(
     }
 }
 
-/// 한 턴의 결과 (chat_loop 에서 세션 저장에 사용).
-/// 한 턴(사용자 프롬프트 → 응답)의 결과.
-pub struct TurnResult {
-    pub exit_code: i32,
-    pub assistant_content: String,
-    pub files_touched: Vec<String>,
-}
-
 /// 한 턴(사용자 프롬프트 → 응답)을 세그먼트 체인으로 실행한다.
 /// 핸드오프로 이어지면 새 세그먼트를 실행한다 (run 과 동일 공통 코어).
 #[allow(clippy::too_many_arguments)]
@@ -554,6 +549,7 @@ pub async fn run_turn(
     let mut files_touched: Vec<String> = Vec::new();
     let mut all_input: u64 = 0;
     let mut all_output: u64 = 0;
+    let mut all_reasoning = String::new();
     let mut segment_statuses: Vec<SegmentStatus> = Vec::new();
     let mut final_content = String::new();
     let start = Instant::now();
@@ -564,6 +560,10 @@ pub async fn run_turn(
             return Ok(TurnResult {
                 exit_code: EXIT_INTERRUPTED,
                 assistant_content: final_content,
+                reasoning_content: all_reasoning.clone(),
+                input_tokens: all_input,
+                output_tokens: all_output,
+                duration_ms: start.elapsed().as_millis() as u64,
                 files_touched,
             });
         }
@@ -617,6 +617,10 @@ pub async fn run_turn(
         if !result.content.trim().is_empty() {
             final_content = result.content.clone();
         }
+        // reasoning 누적 (TUI 모델 생각 표시용).
+        if !result.reasoning_content.trim().is_empty() {
+            all_reasoning.push_str(&result.reasoning_content);
+        }
 
         history::finish_run(
             conn,
@@ -661,6 +665,10 @@ pub async fn run_turn(
                         final_content,
                         "(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)",
                     ),
+                    reasoning_content: all_reasoning.clone(),
+                    input_tokens: all_input,
+                    output_tokens: all_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
                     files_touched,
                 });
             }
@@ -671,6 +679,10 @@ pub async fn run_turn(
                         final_content,
                         "(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)",
                     ),
+                    reasoning_content: all_reasoning.clone(),
+                    input_tokens: all_input,
+                    output_tokens: all_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
                     files_touched,
                 });
             }
@@ -678,6 +690,10 @@ pub async fn run_turn(
                 return Ok(TurnResult {
                     exit_code: EXIT_INTERRUPTED,
                     assistant_content: final_content,
+                    reasoning_content: all_reasoning.clone(),
+                    input_tokens: all_input,
+                    output_tokens: all_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
                     files_touched,
                 });
             }
@@ -696,6 +712,10 @@ pub async fn run_turn(
         return Ok(TurnResult {
             exit_code: EXIT_OK,
             assistant_content: final_content,
+            reasoning_content: all_reasoning.clone(),
+            input_tokens: all_input,
+            output_tokens: all_output,
+            duration_ms: start.elapsed().as_millis() as u64,
             files_touched,
         });
     }

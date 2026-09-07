@@ -42,17 +42,36 @@ fn set_active(v: bool) {
 }
 
 /// 대화 한 줄 (화면에 표시할 메시지).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatLine {
     pub role: Role,
     pub text: String,
+    /// 모델 추론 중간 생각 (응답 생성 중에만 표시, 완료 시 접혀서 저장).
+    pub reasoning_content: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+}
+
+/// 한 턴(사용자 프롬프트 → 응답)의 결과. chat_cmd 의 `run_turn` 과
+/// TUI processor 가 공유하는 규약이다.
+#[derive(Debug, Clone)]
+pub struct TurnResult {
+    pub exit_code: i32,
+    pub assistant_content: String,
+    pub reasoning_content: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+    pub files_touched: Vec<String>,
 }
 
 /// 메시지 역할.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Role {
     User,
     Assistant,
+    #[default]
     Status,
 }
 
@@ -87,15 +106,16 @@ impl Drop for TerminalGuard {
 /// 스트림 텍스트 모드로 대화하게 한다.
 ///
 /// `processor` 는 사용자 메시지를 받아 한 턴(세그먼트 체인)을 실행하고
-/// 모델 응답 문자열을 반환하는 클로저다. TUI 루프는 Enter 로 메시지를
-/// 전송할 때마다 processor 를 호출해 응답을 대화 리스트에 추가한다.
+/// `TurnResult` 를 반환하는 클로저다. TUI 루프는 Enter 로 메시지를
+/// 전송할 때마다 processor 를 호출해 응답·생각·토큰·속도를 대화 리스트에
+/// 추가한다.
 pub fn run_tui<F>(
     options: &TuiOptions,
     initial_lines: Vec<ChatLine>,
     mut processor: F,
 ) -> Result<Option<TuiOutcome>, Box<dyn std::error::Error>>
 where
-    F: FnMut(String) -> Result<String, Box<dyn std::error::Error>>,
+    F: FnMut(String) -> Result<TurnResult, Box<dyn std::error::Error>>,
 {
     if !io::stdout().is_terminal() {
         return Ok(None);
@@ -131,7 +151,7 @@ where
             draw_title(f, chunks[0], &options.endpoint_name, &options.model);
             draw_scroll(f, chunks[1], &lines, offset_from_bottom);
             draw_input(f, chunks[2], &input);
-            draw_status(f, chunks[3], &options.session_id, saved);
+            draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
         })?;
 
         if !event::poll(Duration::from_millis(200))? {
@@ -169,6 +189,7 @@ where
                 lines.push(ChatLine {
                     role: Role::Status,
                     text: "세션은 매 턴 자동 저장됩니다".to_string(),
+                    ..ChatLine::default()
                 });
                 offset_from_bottom = 0;
             }
@@ -181,10 +202,14 @@ where
                 lines.push(ChatLine {
                     role: Role::User,
                     text: trimmed.clone(),
+                    ..ChatLine::default()
                 });
+                // 응답 생성 중 상태를 표시한다. processor 는 동기 실행되므로
+                // reasoning 은 완료 후 접힌 채 저장된다.
                 lines.push(ChatLine {
                     role: Role::Status,
                     text: "응답 생성 중...".to_string(),
+                    ..ChatLine::default()
                 });
                 terminal.draw(|f| {
                     let size = f.area();
@@ -200,22 +225,27 @@ where
                     draw_title(f, chunks[0], &options.endpoint_name, &options.model);
                     draw_scroll(f, chunks[1], &lines, 0);
                     draw_input(f, chunks[2], &input);
-                    draw_status(f, chunks[3], &options.session_id, saved);
+                    draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
                 })?;
 
                 let response = processor(trimmed);
                 let _ = lines.pop(); // "응답 생성 중..."
                 match response {
-                    Ok(assistant) => {
+                    Ok(turn) => {
                         lines.push(ChatLine {
                             role: Role::Assistant,
-                            text: assistant,
+                            text: turn.assistant_content.clone(),
+                            reasoning_content: turn.reasoning_content.clone(),
+                            input_tokens: turn.input_tokens,
+                            output_tokens: turn.output_tokens,
+                            duration_ms: turn.duration_ms,
                         });
                     }
                     Err(e) => {
                         lines.push(ChatLine {
                             role: Role::Status,
                             text: format!("오류: {e}"),
+                            ..ChatLine::default()
                         });
                     }
                 }
@@ -235,6 +265,12 @@ where
             }
             KeyCode::PageDown => {
                 offset_from_bottom = offset_from_bottom.saturating_sub(10);
+            }
+            KeyCode::Up => {
+                offset_from_bottom = offset_from_bottom.saturating_add(1);
+            }
+            KeyCode::Down => {
+                offset_from_bottom = offset_from_bottom.saturating_sub(1);
             }
             KeyCode::Esc => {}
             _ => {}
@@ -291,8 +327,8 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 
 /// 대화 메시지 렌더링 (래핑 + 하단 고정 스크롤).
 fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_from_bottom: usize) {
-    let inner_width = area.width.saturating_sub(4).max(1) as usize;
-    let text_width = inner_width.saturating_sub(2).max(1);
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let text_width = inner_width.max(1);
     let mut text_lines: Vec<Line> = Vec::new();
     for l in lines {
         let prefix = match l.role {
@@ -313,16 +349,34 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_fr
                 Span::styled(wline, style),
             ]));
         }
+        // 모델 생각(reasoning) — 응답 생성 중에만 펼쳐 표시하고, 완료된 응답은
+        // "🤔 생각 보기" 한 줄로 접어서 저장한다.
+        if !l.reasoning_content.trim().is_empty() {
+            text_lines.push(Line::from(vec![Span::styled(
+                format!("🤔 생각 ({}자)", l.reasoning_content.chars().count()),
+                Style::default().fg(Color::DarkGray),
+            )]));
+        }
     }
 
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let max_scroll = text_lines.len().saturating_sub(inner_h);
-    let scroll = max_scroll.saturating_sub(offset_from_bottom);
-
+    let scroll = scroll_from_bottom(text_lines.len(), area.height, offset_from_bottom);
     let para = Paragraph::new(text_lines)
-        .block(Block::default().borders(Borders::ALL).title("대화"))
-        .scroll((scroll as u16, 0));
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0))
+        .block(Block::default().padding(ratatui::widgets::Padding::new(1, 1, 0, 0)));
     f.render_widget(para, area);
+}
+
+/// 하단 고정 스크롤 오프셋 계산.
+fn scroll_from_bottom(total_lines: usize, height: u16, offset_from_bottom: usize) -> usize {
+    let inner_h = height.saturating_sub(2) as usize;
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    max_scroll.saturating_sub(offset_from_bottom)
+}
+
+/// 마지막 Assistant 응답을 찾아 상태 표시줄에 토큰/속도를 보여준다.
+fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
+    lines.iter().rev().find(|l| l.role == Role::Assistant)
 }
 
 /// 입력창 렌더링.
@@ -337,13 +391,30 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str) {
     f.render_widget(p, area);
 }
 
-/// 상태 표시.
-fn draw_status(f: &mut ratatui::Frame, area: Rect, session_id: &str, saved: bool) {
-    let status = if saved {
+/// 상태 표시 — 세션 id·저장 여부·최근 응답 토큰/속도.
+fn draw_status(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    session_id: &str,
+    saved: bool,
+    last: Option<&ChatLine>,
+) {
+    let mut status = if saved {
         format!("세션 저장됨 — {session_id}")
     } else {
         format!("세션 id: {session_id}")
     };
+    if let Some(l) = last {
+        let speed = if l.duration_ms > 0 {
+            l.output_tokens as f64 / (l.duration_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        status.push_str(&format!(
+            "  ↑{} ↓{} {:.1}t/s",
+            l.input_tokens, l.output_tokens, speed
+        ));
+    }
     let p = Paragraph::new(status)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Right);
@@ -360,6 +431,7 @@ mod tests {
         let l = ChatLine {
             role: Role::User,
             text: "안녕".to_string(),
+            ..ChatLine::default()
         };
         assert_eq!(l.role, Role::User);
         assert_eq!(l.text, "안녕");
@@ -373,7 +445,18 @@ mod tests {
             model: "model".to_string(),
             session_id: "sid".to_string(),
         };
-        let result = run_tui(&options, vec![], |_| Ok("ok".to_string())).unwrap();
+        let result = run_tui(&options, vec![], |_| {
+            Ok(TurnResult {
+                exit_code: 0,
+                assistant_content: "ok".to_string(),
+                reasoning_content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+                files_touched: vec![],
+            })
+        })
+        .unwrap();
         assert!(result.is_none());
     }
 
