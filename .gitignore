@@ -1,2 +1,7 @@
 /target
 /fakehome
+# 테스트가 프로젝트 루트에 생성하는 임시 파일
+/a.rs
+/out.txt
+/mock_out.txt
+/src/new.rs
