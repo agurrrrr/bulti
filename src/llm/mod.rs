@@ -382,6 +382,8 @@ mod tests {
             thinking: true,
             max_iterations: 200,
             reasoning_effort: None,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
         }
     }
 

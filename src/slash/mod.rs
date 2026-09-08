@@ -107,6 +107,14 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_args: true,
         args_required: false,
     },
+    SlashCommand {
+        name: "usage",
+        aliases: &["u"],
+        description: "세션 토큰·비용 사용량 표시",
+        usage: "/usage",
+        takes_args: false,
+        args_required: false,
+    },
 ];
 
 /// 자동완성 제안 항목.

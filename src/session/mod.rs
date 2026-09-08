@@ -50,13 +50,20 @@ pub fn session_path(id: &str) -> Result<PathBuf, SessionError> {
 }
 
 /// 한 턴(사용자 프롬프트 → 모델 응답)의 기록.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 토큰 필드는 `#[serde(default)]` — 이전 버전 세션 JSON 호환.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub turn: u32,
     pub user: String,
     pub assistant: String,
     pub chain_id: String,
     pub files_touched: Vec<String>,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub model: String,
 }
 
 /// 세션 파일 본문.
@@ -90,6 +97,34 @@ impl Session {
     pub fn push_turn(&mut self, turn: TurnRecord) {
         self.turns.push(turn);
         self.updated_at = crate::history::now_rfc3339();
+    }
+
+    /// 세션 누적 input 토큰 합.
+    pub fn total_input_tokens(&self) -> u64 {
+        self.turns.iter().map(|t| t.input_tokens).sum()
+    }
+
+    /// 세션 누적 output 토큰 합.
+    pub fn total_output_tokens(&self) -> u64 {
+        self.turns.iter().map(|t| t.output_tokens).sum()
+    }
+
+    /// 모델별 사용량 (모델명, input, output) — 모델명 정렬.
+    /// 토큰이 0 이고 모델명도 비어 있는 턴(구버전 세션·컴팩트)은 제외한다.
+    pub fn per_model_usage(&self) -> Vec<(String, u64, u64)> {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        for t in &self.turns {
+            if t.input_tokens == 0 && t.output_tokens == 0 {
+                continue;
+            }
+            let entry = map.entry(t.model.clone()).or_insert((0, 0));
+            entry.0 += t.input_tokens;
+            entry.1 += t.output_tokens;
+        }
+        map.into_iter()
+            .map(|(m, (i, o))| (m, i, o))
+            .collect()
     }
 
     /// 재개용 대화 기록 문자열을 만든다. 이전 턴의 사용자·모델 메시지를
@@ -250,6 +285,7 @@ mod tests {
             assistant: "안녕하세요".to_string(),
             chain_id: "chain-1".to_string(),
             files_touched: vec!["src/a.rs".to_string()],
+            ..Default::default()
         });
         session.push_turn(TurnRecord {
             turn: 1,
@@ -257,6 +293,7 @@ mod tests {
             assistant: "요약입니다".to_string(),
             chain_id: "chain-2".to_string(),
             files_touched: vec![],
+            ..Default::default()
         });
 
         let path = save(&session).unwrap();
@@ -279,6 +316,7 @@ mod tests {
             assistant: "답변1".to_string(),
             chain_id: "c".to_string(),
             files_touched: vec![],
+            ..Default::default()
         });
         let ctx = session.conversation_context();
         assert!(ctx.contains("질문1"));
@@ -297,6 +335,7 @@ mod tests {
             assistant: "답변1".to_string(),
             chain_id: "c1".to_string(),
             files_touched: vec!["src/a.rs".to_string()],
+            ..Default::default()
         });
         session.push_turn(TurnRecord {
             turn: 1,
@@ -304,6 +343,7 @@ mod tests {
             assistant: "답변2".to_string(),
             chain_id: "c2".to_string(),
             files_touched: vec![],
+            ..Default::default()
         });
 
         let forked = session.fork("sess-fork");
@@ -330,6 +370,7 @@ mod tests {
             assistant: "답변1".to_string(),
             chain_id: "c1".to_string(),
             files_touched: vec!["src/a.rs".to_string()],
+            ..Default::default()
         });
 
         let md = session.export_markdown();
@@ -353,6 +394,7 @@ mod tests {
             assistant: "긴 답변 텍스트".repeat(10),
             chain_id: "c".to_string(),
             files_touched: vec![],
+            ..Default::default()
         });
         assert!(session.estimate_tokens() > 0);
     }

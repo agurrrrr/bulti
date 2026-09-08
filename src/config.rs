@@ -32,7 +32,7 @@ pub enum ConfigError {
 }
 
 /// 엔드포인트 설정 (§3.1 `[endpoints.*]`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EndpointConfig {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +53,12 @@ pub struct EndpointConfig {
     /// reasoning effort (low|medium|high). None 이면 미설정.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// 1M 토큰당 input 가격 (USD). `bulti.toml` 에 미설정 시 None — 비용 표시 "—".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price_per_mtok: Option<f64>,
+    /// 1M 토큰당 output 가격 (USD). `bulti.toml` 에 미설정 시 None — 비용 표시 "—".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price_per_mtok: Option<f64>,
 }
 
 fn default_context_tokens() -> u64 {
@@ -271,6 +277,8 @@ pub(crate) mod tests {
                     thinking: true,
                     max_iterations: 200,
                     reasoning_effort: None,
+                    input_price_per_mtok: None,
+                    output_price_per_mtok: None,
                 },
             )]),
             mcp: std::collections::BTreeMap::from([(

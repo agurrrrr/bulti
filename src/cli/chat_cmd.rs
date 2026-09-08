@@ -134,6 +134,8 @@ fn ensure_endpoint_interactive(
         thinking: false,
         max_iterations: 200,
         reasoning_effort: None,
+        input_price_per_mtok: None,
+        output_price_per_mtok: None,
     };
     cfg.endpoints.insert(name.clone(), ep.clone());
     // 첫 등록이면 자동 활성화.
@@ -356,6 +358,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                 assistant: turn_result.assistant_content.clone(),
                 chain_id: chain_id.clone(),
                 files_touched: turn_result.files_touched.clone(),
+                input_tokens: turn_result.input_tokens,
+                output_tokens: turn_result.output_tokens,
+                model: endpoint_guard.model.clone(),
             });
             if let Err(e) = session::save(&s) {
                 tracing::error!("세션 저장 실패: {e}");
@@ -567,6 +572,17 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                                 exit: false,
                             },
                         }
+                    }
+                }
+                "usage" => {
+                    let text = {
+                        let s = session_ch.lock().unwrap();
+                        let ep = endpoint_cmd.lock().unwrap();
+                        usage_text(&s, &ep)
+                    };
+                    crate::tui::CommandResult {
+                        message: text,
+                        exit: false,
                     }
                 }
                 _ => crate::tui::CommandResult {
@@ -847,6 +863,10 @@ async fn chat_loop(
                     }
                     continue;
                 }
+                "usage" => {
+                    println!("{}", color(&usage_text(session, endpoint)));
+                    continue;
+                }
                 "" => {
                     // 미지원 슬래시 커맨드 안내.
                     println!(
@@ -938,6 +958,9 @@ async fn chat_loop(
             assistant: turn_result.assistant_content.clone(),
             chain_id: chain_id.clone(),
             files_touched: turn_result.files_touched.clone(),
+            input_tokens: turn_result.input_tokens,
+            output_tokens: turn_result.output_tokens,
+            model: endpoint.model.clone(),
         });
         if let Err(e) = session::save(session) {
             tracing::error!("세션 저장 실패: {e}");
@@ -1156,6 +1179,32 @@ fn with_status_note(content: String, note: &str) -> String {
     }
 }
 
+/// `/usage` — 세션 누적 토큰·비용 사용량 텍스트.
+fn usage_text(session: &session::Session, endpoint: &EndpointConfig) -> String {
+    let total_in = session.total_input_tokens();
+    let total_out = session.total_output_tokens();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "세션 총합: ↑{total_in} ↓{total_out} (턴 {})",
+        session.turns.len()
+    ));
+    for (model, in_t, out_t) in session.per_model_usage() {
+        out.push_str(&format!("\n  {model}: ↑{in_t} ↓{out_t}"));
+    }
+    let cost = match (
+        endpoint.input_price_per_mtok,
+        endpoint.output_price_per_mtok,
+    ) {
+        (Some(pin), Some(pout)) => {
+            let c = total_in as f64 / 1_000_000.0 * pin + total_out as f64 / 1_000_000.0 * pout;
+            format!("\n비용: ${c:.4}")
+        }
+        _ => "\n비용: — (bulti.toml 에 input_price_per_mtok·output_price_per_mtok 미설정)".to_string(),
+    };
+    out.push_str(&cost);
+    out
+}
+
 /// `/session-info` — 현재 세션 정보 텍스트 (id·cwd·모델·컨텍스트 사용량).
 fn session_info_text(session: &session::Session, context_tokens: u64) -> String {
     let est = session.estimate_tokens();
@@ -1265,6 +1314,9 @@ fn apply_compact(sess: &mut session::Session, summary: String) {
         assistant: summary,
         chain_id: "compact".to_string(),
         files_touched: vec![],
+        input_tokens: 0,
+        output_tokens: 0,
+        model: String::new(),
     }];
 }
 
@@ -1277,6 +1329,7 @@ fn print_help() {
     println!("  /model <name> [effort] — 모델 전환 (effort: low|medium|high)");
     println!("  /effort <low|medium|high> — reasoning effort 설정");
     println!("  /session-info      — 현재 세션 정보 (id·모델·컨텍스트 사용량)");
+    println!("  /usage             — 세션 토큰·비용 사용량 표시");
     println!("  /sessions          — 세션 목록 조회");
     println!("  /compact           — 대화 기록을 요약으로 압축");
     println!("  /fork              — 현재 세션을 분기 (새 id 로 복제)");

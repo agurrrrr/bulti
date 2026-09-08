@@ -531,6 +531,8 @@ mod tests {
             thinking: false,
             max_iterations: 100,
             reasoning_effort: None,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
         };
 
         let report = build_json_report(

@@ -67,6 +67,8 @@ pub fn add_endpoint(cfg: &mut Config, spec: &EndpointAddSpec) -> Result<(), Endp
         thinking: spec.thinking,
         max_iterations: 200,
         reasoning_effort: None,
+        input_price_per_mtok: None,
+        output_price_per_mtok: None,
     };
     cfg.endpoints.insert(spec.name.clone(), ep);
     // 첫 등록이면 자동 활성화.

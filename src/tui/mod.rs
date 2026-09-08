@@ -358,7 +358,17 @@ where
             draw_input(f, chunks[2], &input, &ghost);
             draw_completions(f, chunks[2], &completions, completion_idx);
             draw_text_completions(f, chunks[2], &text_completions, text_completion_idx);
-            draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
+            let total_in: u64 = lines.iter().map(|l| l.input_tokens).sum();
+            let total_out: u64 = lines.iter().map(|l| l.output_tokens).sum();
+            draw_status(
+                f,
+                chunks[3],
+                &options.session_id,
+                saved,
+                total_in,
+                total_out,
+                last_assistant(&lines),
+            );
         })?;
 
         // 진행 중 턴이 끝났는지 확인한다. 끝났으면 최종 결과를 처리한다.
@@ -932,12 +942,15 @@ fn update_text_completions(
     *active = !completions.is_empty();
 }
 
-/// 상태 표시 — 세션 id·저장 여부·최근 응답 토큰/속도.
+/// 상태 표시 — 세션 id·저장 여부·세션 누적 토큰·최근 응답 토큰/속도.
+/// 주의: Session lock 금지 — 누적 토큰은 호출부에서 전달받는다.
 fn draw_status(
     f: &mut ratatui::Frame,
     area: Rect,
     session_id: &str,
     saved: bool,
+    total_in: u64,
+    total_out: u64,
     last: Option<&ChatLine>,
 ) {
     let mut status = if saved {
@@ -945,6 +958,7 @@ fn draw_status(
     } else {
         format!("세션 id: {session_id}")
     };
+    status.push_str(&format!("  세션 ↑{total_in} ↓{total_out}"));
     if let Some(l) = last {
         let speed = if l.duration_ms > 0 {
             l.output_tokens as f64 / (l.duration_ms as f64 / 1000.0)

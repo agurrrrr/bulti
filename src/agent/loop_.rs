@@ -480,6 +480,8 @@ mod tests {
                 thinking: false,
                 max_iterations,
                 reasoning_effort: None,
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             },
             temperature: None,
             system_prompt: "시스템".to_string(),

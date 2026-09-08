@@ -294,6 +294,8 @@ mod tests {
                 thinking: false,
                 max_iterations: 200,
                 reasoning_effort: None,
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
             global_dir: global.to_path_buf(),
             project_root: root.to_path_buf(),

@@ -47,6 +47,8 @@ fn test_endpoint(url: &str) -> EndpointConfig {
         thinking: false,
         max_iterations: 20,
         reasoning_effort: None,
+        input_price_per_mtok: None,
+        output_price_per_mtok: None,
     }
 }
 
@@ -432,6 +434,8 @@ async fn full_pipeline_real_llm() {
         thinking: false,
         max_iterations: 20,
         reasoning_effort: None,
+        input_price_per_mtok: None,
+        output_price_per_mtok: None,
     };
 
     let (conn, _dir) = temp_history();
