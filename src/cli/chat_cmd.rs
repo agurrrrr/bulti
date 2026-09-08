@@ -60,6 +60,134 @@ const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_INTERRUPTED: i32 = 130;
 
+/// 스트림 텍스트 모드 점진 출력기 (비 TTY).
+///
+/// reasoning·content 델타를 누적해 `render::parse`+`render_ansi` 로 부분 렌더하고
+/// stdout 에 점진 출력한다.
+///
+/// - reasoning 은 `[생각]` 머리글로 별도 구분 (use_color 시 dim). content 스트림
+///   시작 시점에 한 번에 쓴다.
+/// - content 는 **안정 접두**만 쓴다. markdown 파서는 마지막 빈 줄 이후의 문단을
+///   아직 닫히지 않은 블록으로 취급해, 같은 입력 접두라도 나중에 다른 행으로
+///   재렌더될 수 있다. 따라서 마지막 빈 줄 경계(이전 출력에 영향을 주지 않는
+///   접두)에만 도달했을 때 그 부분 렌더의 접미사를 플러시한다.
+/// - `finalize` 가 남은 불완전 부분을 마무리한다 (중복 출력 없음).
+struct StreamPrinter {
+    use_color: bool,
+    reasoning: String,
+    content: String,
+    /// stdout 에 이미 쓴 누적 출력 (render() 결과의 접전).
+    printed: String,
+    /// content 의 안정 접두 길이 (마지막 빈 줄 경계, 바이트).
+    stable_len: usize,
+    /// 어떤 델타라도 받은 적이 있는지 (false 면 호출부가 일괄 출력 폴백).
+    active: bool,
+}
+
+impl StreamPrinter {
+    fn new(use_color: bool) -> Self {
+        Self {
+            use_color,
+            reasoning: String::new(),
+            content: String::new(),
+            printed: String::new(),
+            stable_len: 0,
+            active: false,
+        }
+    }
+
+    /// content 의 안정 접두 길이를 계산한다.
+    ///
+    /// 마지막 빈 줄까지의 접두는 이후 arriving 텍스트와 같은 블록으로 병합될
+    /// 수 없으므로(빈 줄이 블록 경계) 렌더가 불변이다. 그 경계 앞까지만 안정.
+    fn stable_prefix_len(content: &str) -> usize {
+        match content.rfind("\n\n") {
+            Some(i) => i + 2,
+            None => 0,
+        }
+    }
+
+    /// reasoning_content 델타를 누적한다 (content 시작 시점에 출력).
+    fn print_reasoning(&mut self, text: &str) {
+        self.active = true;
+        self.reasoning.push_str(text);
+    }
+
+    /// content 델타를 누적해 점진 출력한다.
+    fn print_content(&mut self, text: &str) {
+        self.active = true;
+        self.content.push_str(text);
+        // content 가 시작되는 순간 reasoning 을 먼저 쓴다 (기존 일괄 출력 순서 유지).
+        if !self.reasoning.trim().is_empty() && self.printed.is_empty() {
+            self.printed = self.render_reasoning();
+            let _ = std::io::stdout().write_all(self.printed.as_bytes());
+        }
+        self.flush();
+    }
+
+    /// 스트림 완료 시 마무리. 남은 불완전 부분을 쓰고 종료 줄바꿈을 보장한다.
+    /// 어떤 출력도 없으면 `false` (호출부가 일괄 출력 폴백).
+    fn finalize(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        let rendered = self.render();
+        let mut rest = rendered.strip_prefix(&self.printed).unwrap_or(&rendered).to_string();
+        if !rest.ends_with('\n') {
+            rest.push('\n');
+        }
+        if !rest.is_empty() {
+            let _ = std::io::stdout().write_all(rest.as_bytes());
+            self.printed = rendered;
+        }
+        let _ = std::io::stdout().flush();
+        true
+    }
+
+    /// 안정 접두 경계가 앞으로 이동하면 그 부분 렌더의 접미사를 플러시한다.
+    fn flush(&mut self) {
+        let stable = Self::stable_prefix_len(&self.content);
+        if stable <= self.stable_len {
+            return;
+        }
+        let rendered = self.render();
+        let Some(suffix) = rendered.strip_prefix(&self.printed) else {
+            return;
+        };
+        let _ = std::io::stdout().write_all(suffix.as_bytes());
+        let _ = std::io::stdout().flush();
+        self.printed = rendered;
+        self.stable_len = stable;
+    }
+
+    /// [생각] 머리글 렌더 (reasoning 비어 있으면 "").
+    fn render_reasoning(&self) -> String {
+        if self.reasoning.trim().is_empty() {
+            return String::new();
+        }
+        let dim = if self.use_color { "\x1b[2m" } else { "" };
+        let reset = if self.use_color { "\x1b[0m" } else { "" };
+        format!(
+            "{}[생각] {}{}\n",
+            dim,
+            strip_ansi(&self.reasoning),
+            reset
+        )
+    }
+
+    /// [생각] 머리글 + markdown 렌더로 전체 출력을 조립한다.
+    fn render(&self) -> String {
+        let mut out = self.render_reasoning();
+        if !self.content.trim().is_empty() {
+            let blocks = crate::render::parse(&self.content);
+            let body = crate::render::render_ansi(&blocks);
+            let body = if self.use_color { body } else { strip_ansi(&body) };
+            out.push_str(&body);
+        }
+        out
+    }
+}
+
 /// 엔드포인트가 설정되지 않았을 때 대화형으로 설정을 안내하고 등록한다.
 /// TTY 가 아니면 `None` 을 반환해 호출부가 오류로 종료하게 한다.
 fn ensure_endpoint_interactive(
@@ -904,7 +1032,23 @@ async fn chat_loop(
         };
 
         // 한 턴 실행 (세그먼트 체인 — run 과 동일한 핸드오프 로직 재사용).
+        // 스트림 텍스트 모드: delta 채널을 만들어 점진 출력 태스크와 병렬로 소비한다.
         let chain_id = make_uuid();
+        let (delta_tx, mut delta_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::llm::Delta>();
+        let printer = tokio::spawn(async move {
+            let mut printer = StreamPrinter::new(use_color);
+            while let Some(delta) = delta_rx.recv().await {
+                if let Some(r) = &delta.reasoning_content {
+                    printer.print_reasoning(r);
+                }
+                if let Some(c) = &delta.content {
+                    printer.print_content(c);
+                }
+                // tool_calls 은 텍스트 모드에서 무시.
+            }
+            printer.finalize()
+        });
         let turn_result = run_turn(
             &client,
             conn,
@@ -919,7 +1063,7 @@ async fn chat_loop(
             session_id.clone(),
             turn,
             interrupted.clone(),
-            None,
+            Some(delta_tx),
         )
         .await?;
 
@@ -927,28 +1071,43 @@ async fn chat_loop(
         if turn_result.exit_code == EXIT_INTERRUPTED {
             return Ok(EXIT_INTERRUPTED);
         }
+        // 점진 출력 결과를 수취 (run_turn 이 완료된 뒤 태스크는 이미 종료).
+        let printed = printer.await.unwrap_or(false);
 
-        // 스트림 텍스트 모드: 턴 결과를 여기서만 stdout 에 출력한다.
+        // 스트림 텍스트 모드: 턴 결과를 stdout 에 출력한다.
         // TUI 경로는 run_turn 을 직접 호출하지 않고 processor 반환값을 그린다.
-        if !turn_result.reasoning_content.trim().is_empty() {
-            let reasoning = if use_color {
-                format!("\x1b[2m[생각] {}\x1b[0m", turn_result.reasoning_content)
-            } else {
-                format!("[생각] {}", strip_ansi(&turn_result.reasoning_content))
-            };
-            println!("\n{reasoning}");
-        }
-        if !turn_result.assistant_content.trim().is_empty() {
-            let blocks = crate::render::parse(&turn_result.assistant_content);
-            let rendered = crate::render::render_ansi(&blocks);
-            let final_text = if use_color {
-                rendered
-            } else {
-                // ANSI 가 없으면 순수 텍스트로만 출력한다.
-                strip_ansi(&rendered)
-            };
-            println!("\n{final_text}");
-            println!();
+        if printed {
+            // 점진 출력으로 reasoning·content 를 이미 썼다 — 중복 출력 금지.
+            // 단, 실패·미완료 status note 는 delta 에 없으므로 note 만 별도 출력.
+            let note = strip_status_note(&turn_result.assistant_content);
+            if !note.is_empty() {
+                if !turn_result.assistant_content.trim().is_empty() {
+                    println!();
+                }
+                println!("{}", color(&note));
+            }
+        } else {
+            // 폴백: 델타가 전혀 없었으면 (도구 호출만 있는 턴 등) 기존 일괄 출력.
+            if !turn_result.reasoning_content.trim().is_empty() {
+                let reasoning = if use_color {
+                    format!("\x1b[2m[생각] {}\x1b[0m", turn_result.reasoning_content)
+                } else {
+                    format!("[생각] {}", strip_ansi(&turn_result.reasoning_content))
+                };
+                println!("\n{reasoning}");
+            }
+            if !turn_result.assistant_content.trim().is_empty() {
+                let blocks = crate::render::parse(&turn_result.assistant_content);
+                let rendered = crate::render::render_ansi(&blocks);
+                let final_text = if use_color {
+                    rendered
+                } else {
+                    // ANSI 가 없으면 순수 텍스트로만 출력한다.
+                    strip_ansi(&rendered)
+                };
+                println!("\n{final_text}");
+                println!();
+            }
         }
 
         // 턴 종료 시 세션에 턴을 기록하고 저장 (핸드오프 체인 완료 후).
@@ -1177,6 +1336,22 @@ fn with_status_note(content: String, note: &str) -> String {
     } else {
         format!("{content}\n\n{note}")
     }
+}
+
+/// `with_status_note` 로 붙은 안내 문구를 분리해 반환한다.
+///
+/// 안내가 없으면 빈 문자열 (호출부가 일괄 출력 폴백을 그대로 쓴다).
+fn strip_status_note(content: &str) -> String {
+    let notes = [
+        "(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)",
+        "(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)",
+    ];
+    for note in &notes {
+        if content.ends_with(note) {
+            return note.to_string();
+        }
+    }
+    String::new()
 }
 
 /// `/usage` — 세션 누적 토큰·비용 사용량 텍스트.
