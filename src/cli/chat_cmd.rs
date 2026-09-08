@@ -29,6 +29,32 @@ use crate::mcp::McpManager;
 use crate::session;
 use crate::tui::TurnResult;
 
+/// ANSI 이스케이프 시퀀스를 제거해 순수 텍스트로 만든다 (no-color 모드).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            // CSI 시퀀스: \x1b[ ...m 까지 건너뛴다.
+            let mut done = false;
+            for _ in 0..64 {
+                match chars.next() {
+                    Some('m') | Some('K') | Some('H') | Some('n') => {
+                        done = true;
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            let _ = done;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// exit code 매핑 (run 과 동일 규약 재사용).
 const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
@@ -313,7 +339,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     Some(delta_tx),
                 ))
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()).into()
+                    std::io::Error::other(e.to_string()).into()
                 })?
             };
 
@@ -475,8 +501,8 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             interrupted_flag,
             args.first.clone(),
             &mut session_id,
-            &mut *session_guard,
-            &mut *resume_guard,
+            &mut session_guard,
+            &mut resume_guard,
         ))?
     };
 
@@ -741,12 +767,15 @@ async fn chat_loop(
         // 스트림 텍스트 모드: 턴 결과를 여기서만 stdout 에 출력한다.
         // TUI 경로는 run_turn 을 직접 호출하지 않고 processor 반환값을 그린다.
         if !turn_result.assistant_content.trim().is_empty() {
-            let rendered = if use_color {
-                format!("\x1b[36m{}\x1b[0m", turn_result.assistant_content)
+            let blocks = crate::render::parse(&turn_result.assistant_content);
+            let rendered = crate::render::render_ansi(&blocks);
+            let final_text = if use_color {
+                rendered
             } else {
-                turn_result.assistant_content.clone()
+                // ANSI 가 없으면 순수 텍스트로만 출력한다.
+                strip_ansi(&rendered)
             };
-            println!("\n{rendered}");
+            println!("\n{final_text}");
             println!();
         }
 

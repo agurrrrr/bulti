@@ -30,6 +30,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
+/// 진행 중 턴: 델타 수신 채널 + 작업 스레드 핸들.
+type PendingTurn = Option<(
+    tokio::sync::mpsc::UnboundedReceiver<crate::llm::Delta>,
+    JoinHandle<Result<TurnResult, Box<dyn std::error::Error + Send + Sync>>>,
+)>;
+
 /// TUI 가 활성일 때 tracing 이 터미널에 섞이지 않게 한다 (`main` 의 writer 가 조회).
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -169,10 +175,7 @@ where
 
     // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
     // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
-    let mut pending_turn: Option<(
-        tokio::sync::mpsc::UnboundedReceiver<crate::llm::Delta>,
-        JoinHandle<Result<TurnResult, Box<dyn std::error::Error + Send + Sync>>>,
-    )> = None;
+    let mut pending_turn: PendingTurn = None;
 
     let outcome = loop {
         // 진행 중 턴의 델타를 폴링해 화면에 점진적으로 반영한다.
@@ -463,6 +466,37 @@ fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
+/// 스패너 스타일을 보존하며 `width` 열에 맞춰 줄바꿈한다.
+/// 각 스팬은 (텍스트, 스타일) 단위에서 자르고, 자른 조각에 원래 스타일을 붙인다.
+fn wrap_spans<'a>(spans: &[Span<'a>], width: usize) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    let mut cur: Vec<Span<'a>> = Vec::new();
+    let mut w = 0usize;
+    for span in spans {
+        let mut rest: &str = span.content.as_ref();
+        let mut s = String::new();
+        while !rest.is_empty() {
+            let ch = rest.chars().next().unwrap();
+            let cw = if ch.is_ascii() { 1 } else { 2 };
+            if w + cw > width && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                w = 0;
+            }
+            s.push(ch);
+            w += cw;
+            rest = &rest[ch.len_utf8()..];
+            if rest.is_empty() || w >= width {
+                cur.push(Span::styled(s.clone(), span.style));
+                s.clear();
+            }
+        }
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// `width` 열에 맞춰 텍스트를 줄바꿈한다.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
@@ -509,13 +543,33 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_fr
             Role::Assistant => Style::default().fg(Color::Cyan),
             Role::Status => Style::default().fg(Color::DarkGray),
         };
-        let wrapped = wrap_text(&l.text, text_width);
-        for (i, wline) in wrapped.into_iter().enumerate() {
-            let p = if i == 0 { prefix } else { "  " };
-            text_lines.push(Line::from(vec![
-                Span::styled(p, style),
-                Span::styled(wline, style),
-            ]));
+        // Assistant 응답은 마크다운 렌더링을 적용한다 (코드블록·인라인 코드·
+        // 테이블·리스트·헤딩). User/Status 는 기존 평문 래핑을 유지한다.
+        if l.role == Role::Assistant {
+            let blocks = crate::render::parse(&l.text);
+            let rendered = crate::render::render_lines(&blocks);
+            // 렌더링된 각 줄에 prefix/인덴트를 붙인 뒤 스타일을 보존하며 래핑한다.
+            for (i, rline) in rendered.iter().enumerate() {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(prefix, style));
+                } else {
+                    spans.push(Span::raw("  ".to_string()));
+                }
+                spans.extend(rline.spans.iter().cloned());
+                for wrapped in wrap_spans(&spans, text_width) {
+                    text_lines.push(Line::from(wrapped));
+                }
+            }
+        } else {
+            let wrapped = wrap_text(&l.text, text_width);
+            for (i, wline) in wrapped.into_iter().enumerate() {
+                let p = if i == 0 { prefix } else { "  " };
+                text_lines.push(Line::from(vec![
+                    Span::styled(p, style),
+                    Span::styled(wline, style),
+                ]));
+            }
         }
         // 모델 생각(reasoning) — 응답 생성 중에만 펼쳐 표시하고, 완료된 응답은
         // "🤔 생각 보기" 한 줄로 접어서 저장한다.
@@ -662,8 +716,7 @@ fn update_completions(
     active: &mut bool,
     input: &str,
 ) {
-    if input.starts_with('/') {
-        let query = &input[1..];
+    if let Some(query) = input.strip_prefix('/') {
         let mut next = crate::slash::suggest(query);
         next.dedup_by(|a, b| a.insert == b.insert);
         *completions = next;
