@@ -67,6 +67,46 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_args: true,
         args_required: true,
     },
+    SlashCommand {
+        name: "session-info",
+        aliases: &["info"],
+        description: "현재 세션 정보 표시 (id·모델·컨텍스트 사용량)",
+        usage: "/session-info",
+        takes_args: false,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "sessions",
+        aliases: &["ls"],
+        description: "세션 목록 조회",
+        usage: "/sessions",
+        takes_args: false,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "compact",
+        aliases: &[],
+        description: "대화 히스토리 컴팩트 (요약으로 컨텍스트 축소)",
+        usage: "/compact",
+        takes_args: false,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "fork",
+        aliases: &[],
+        description: "현재 세션을 분기 (새 세션 id 로 복제)",
+        usage: "/fork",
+        takes_args: false,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "export",
+        aliases: &[],
+        description: "대화 기록 마크다운 파일로 내보내기",
+        usage: "/export [파일경로]",
+        takes_args: true,
+        args_required: false,
+    },
 ];
 
 /// 자동완성 제안 항목.

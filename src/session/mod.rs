@@ -102,6 +102,60 @@ impl Session {
         }
         out
     }
+
+    /// 대화 기록 전체의 토큰 수를 추정한다.
+    /// 정확한 토큰 카운터 없이 글자 수 근사(0.75 배)로 컨텍스트 사용량을
+    /// 표시한다 (`/session-info` 용).
+    pub fn estimate_tokens(&self) -> u64 {
+        let text = self.conversation_context();
+        let chars = text.chars().count() as u64;
+        chars * 3 / 4
+    }
+
+    /// `/export` 용: 대화를 사람이 읽기 좋은 마크다운 문서로 만든다.
+    pub fn export_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# bulti 세션 기록\n\n");
+        out.push_str(&format!("- 세션 id: `{}`\n", self.session_id));
+        out.push_str(&format!("- 엔드포인트: {}\n", self.endpoint));
+        out.push_str(&format!("- 모델: {}\n", self.model));
+        out.push_str(&format!("- 생성: {}\n", self.created_at));
+        out.push_str(&format!("- 마지막 갱신: {}\n", self.updated_at));
+        out.push_str(&format!("- 턴 수: {}\n\n", self.turns.len()));
+        out.push_str("---\n\n");
+        for t in &self.turns {
+            out.push_str(&format!("## 턴 {}\n\n", t.turn));
+            out.push_str("### 사용자\n\n");
+            out.push_str(t.user.trim());
+            out.push_str("\n\n### 모델\n\n");
+            out.push_str(t.assistant.trim());
+            out.push_str("\n\n");
+            if !t.files_touched.is_empty() {
+                out.push_str("**수정 파일**\n\n");
+                for f in &t.files_touched {
+                    out.push_str(&format!("- `{f}`\n"));
+                }
+                out.push('\n');
+            }
+            out.push_str("---\n\n");
+        }
+        out
+    }
+
+    /// `/fork` 용: 새 id 의 포크 세션 클론을 만든다.
+    /// 턴 기록은 그대로 복사하고, id·시각만 새로 만든다.
+    pub fn fork(&self, new_id: &str) -> Self {
+        let now = crate::history::now_rfc3339();
+        Self {
+            session_id: new_id.to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            system_prompt_at: self.system_prompt_at.clone(),
+            turns: self.turns.clone(),
+        }
+    }
 }
 
 /// 세션을 저장한다. 디렉터리가 없으면 생성한다.
@@ -130,13 +184,15 @@ pub fn delete(id: &str) -> Result<(), SessionError> {
     fs::remove_file(&path).map_err(|e| SessionError::Write(e.to_string()))
 }
 
-/// 세션 목록 (id, 생성 시각, 턴 수, 마지막 갱신 시각).
+/// 세션 목록 (id, 생성 시각, 턴 수, 마지막 갱신 시각, 모델, 엔드포인트).
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
     pub id: String,
     pub created_at: String,
     pub updated_at: String,
     pub turns: usize,
+    pub model: String,
+    pub endpoint: String,
 }
 
 /// 세션 디렉터리의 모든 세션 목록을 반환한다. 정렬은 마지막 갱신 시각 역순.
@@ -165,6 +221,8 @@ pub fn list() -> Result<Vec<SessionMeta>, SessionError> {
             created_at: session.created_at,
             updated_at: session.updated_at,
             turns: session.turns.len(),
+            model: session.model,
+            endpoint: session.endpoint,
         });
     }
     metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -227,6 +285,76 @@ mod tests {
         assert!(ctx.contains("답변1"));
         assert!(ctx.contains("[사용자]"));
         assert!(ctx.contains("[모델]"));
+    }
+
+    /// fork 는 턴을 그대로 복제하고 id·시각만 바꾼다.
+    #[test]
+    fn fork_copies_turns_and_changes_id() {
+        let (_dir, mut session) = temp_session();
+        session.push_turn(TurnRecord {
+            turn: 0,
+            user: "질문1".to_string(),
+            assistant: "답변1".to_string(),
+            chain_id: "c1".to_string(),
+            files_touched: vec!["src/a.rs".to_string()],
+        });
+        session.push_turn(TurnRecord {
+            turn: 1,
+            user: "질문2".to_string(),
+            assistant: "답변2".to_string(),
+            chain_id: "c2".to_string(),
+            files_touched: vec![],
+        });
+
+        let forked = session.fork("sess-fork");
+        assert_eq!(forked.session_id, "sess-fork");
+        assert_ne!(forked.session_id, session.session_id);
+        assert_eq!(forked.turns.len(), session.turns.len());
+        assert_eq!(forked.turns[0].user, "질문1");
+        assert_eq!(forked.turns[1].assistant, "답변2");
+        assert_eq!(forked.turns[0].files_touched, vec!["src/a.rs"]);
+        assert_eq!(forked.model, session.model);
+        assert_eq!(forked.endpoint, session.endpoint);
+        // 원본 세션에는 영향이 없어야 한다.
+        assert_eq!(session.session_id, "sess-1");
+        assert_eq!(session.turns.len(), 2);
+    }
+
+    /// export_markdown 은 세션 메타와 모든 턴을 포함한다.
+    #[test]
+    fn export_markdown_includes_meta_and_turns() {
+        let (_dir, mut session) = temp_session();
+        session.push_turn(TurnRecord {
+            turn: 0,
+            user: "질문1".to_string(),
+            assistant: "답변1".to_string(),
+            chain_id: "c1".to_string(),
+            files_touched: vec!["src/a.rs".to_string()],
+        });
+
+        let md = session.export_markdown();
+        assert!(md.contains("# bulti 세션 기록"));
+        assert!(md.contains("`sess-1`"));
+        assert!(md.contains("local"));
+        assert!(md.contains("model-x"));
+        assert!(md.contains("## 턴 0"));
+        assert!(md.contains("질문1"));
+        assert!(md.contains("답변1"));
+        assert!(md.contains("`src/a.rs`"));
+    }
+
+    /// estimate_tokens 는 대화 기록이 있으면 0 보다 크다.
+    #[test]
+    fn estimate_tokens_positive() {
+        let (_dir, mut session) = temp_session();
+        session.push_turn(TurnRecord {
+            turn: 0,
+            user: "긴 질문 텍스트".repeat(10),
+            assistant: "긴 답변 텍스트".repeat(10),
+            chain_id: "c".to_string(),
+            files_touched: vec![],
+        });
+        assert!(session.estimate_tokens() > 0);
     }
 
     /// list 는 갱신 시각 역순으로 정렬한다.

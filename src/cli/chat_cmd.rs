@@ -296,6 +296,11 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         let interrupted_tui = interrupted_flag.clone();
         let endpoint_tui = endpoint_shared.clone();
         let cfg_tui = cfg_shared.clone();
+        // command_handler 도 compact 에서 client·runtime 을 쓰므로, processor 의
+        // move 클로저가 원본을 이동하기 전에 clone 해 둔다.
+        let client_ch = client_tui.clone();
+        let rt_ch = rt_tui.clone();
+        let session_ch = session_tui.clone();
         let processor = move |user_msg: String,
                               delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
               -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -468,6 +473,99 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         crate::tui::CommandResult {
                             message: format!("reasoning effort 를 '{e}' (으)로 설정했습니다."),
                             exit: false,
+                        }
+                    }
+                }
+                "session-info" => {
+                    let ctx = {
+                        let ep = endpoint_cmd.lock().unwrap();
+                        ep.context_tokens
+                    };
+                    let text = {
+                        let s = session_ch.lock().unwrap();
+                        session_info_text(&s, ctx)
+                    };
+                    crate::tui::CommandResult {
+                        message: text,
+                        exit: false,
+                    }
+                }
+                "sessions" => crate::tui::CommandResult {
+                    message: sessions_list_text(),
+                    exit: false,
+                },
+                "fork" => {
+                    let msg = {
+                        let s = session_ch.lock().unwrap();
+                        match fork_session(&s) {
+                            Ok(m) => m,
+                            Err(e) => format!("세션 분기 실패: {e}"),
+                        }
+                    };
+                    crate::tui::CommandResult {
+                        message: msg,
+                        exit: false,
+                    }
+                }
+                "export" => {
+                    let msg = {
+                        let s = session_ch.lock().unwrap();
+                        match export_session(&s, args_str) {
+                            Ok(m) => m,
+                            Err(e) => format!("내보내기 실패: {e}"),
+                        }
+                    };
+                    crate::tui::CommandResult {
+                        message: msg,
+                        exit: false,
+                    }
+                }
+                "compact" => {
+                    let has_turns = {
+                        let s = session_ch.lock().unwrap();
+                        !s.turns.is_empty()
+                    };
+                    if !has_turns {
+                        crate::tui::CommandResult {
+                            message: "컴팩트할 대화가 없습니다. (턴 0개)".to_string(),
+                            exit: false,
+                        }
+                    } else {
+                        let transcript = {
+                            let s = session_ch.lock().unwrap();
+                            s.conversation_context()
+                        };
+                        let ep = endpoint_cmd.lock().unwrap();
+                        let summary = rt_ch
+                            .block_on(compact_transcript(&client_ch, &ep, &transcript))
+                            .map_err(|e| e.to_string());
+                        drop(ep);
+                        match summary {
+                            Ok(sum) if !sum.trim().is_empty() => {
+                                let mut sess = session_ch.lock().unwrap();
+                                apply_compact(&mut sess, sum);
+                                match session::save(&sess) {
+                                    Ok(_) => crate::tui::CommandResult {
+                                        message: "대화 기록을 요약으로 압축했습니다.".to_string(),
+                                        exit: false,
+                                    },
+                                    Err(e) => {
+                                        tracing::error!("세션 저장 실패: {e}");
+                                        crate::tui::CommandResult {
+                                            message: format!("대화 기록을 요약으로 압축했습니다. (저장 실패: {e})"),
+                                            exit: false,
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(_) => crate::tui::CommandResult {
+                                message: "요약이 비어 있어 컴팩트를 취소했습니다. (기존 세션 유지)".to_string(),
+                                exit: false,
+                            },
+                            Err(e) => crate::tui::CommandResult {
+                                message: format!("컴팩트 실패 (기존 세션 유지): {e}"),
+                                exit: false,
+                            },
                         }
                     }
                 }
@@ -701,6 +799,52 @@ async fn chat_loop(
                         tracing::error!("설정 저장 실패: {e}");
                     }
                     println!("{}", color(&format!("reasoning effort 를 '{e}' (으)로 설정했습니다.")));
+                    continue;
+                }
+                "session-info" => {
+                    println!("{}", color(&session_info_text(session, endpoint.context_tokens)));
+                    continue;
+                }
+                "sessions" => {
+                    let text = sessions_list_text();
+                    println!("{}", color(&text));
+                    continue;
+                }
+                "fork" => {
+                    match fork_session(session) {
+                        Ok(m) => println!("{}", color(&m)),
+                        Err(e) => println!("{}", color(&format!("세션 분기 실패: {e}"))),
+                    }
+                    continue;
+                }
+                "export" => {
+                    match export_session(session, args_str) {
+                        Ok(m) => println!("{}", color(&m)),
+                        Err(e) => println!("{}", color(&format!("내보내기 실패: {e}"))),
+                    }
+                    continue;
+                }
+                "compact" => {
+                    if session.turns.is_empty() {
+                        println!("{}", color("컴팩트할 대화가 없습니다. (턴 0개)"));
+                    } else {
+                        let transcript = session.conversation_context();
+                        match compact_transcript(&client, endpoint, &transcript).await {
+                            Ok(summary) if !summary.trim().is_empty() => {
+                                apply_compact(session, summary);
+                                if let Err(e) = session::save(session) {
+                                    tracing::error!("세션 저장 실패: {e}");
+                                }
+                                println!("{}", color("대화 기록을 요약으로 압축했습니다."));
+                            }
+                            Ok(_) => {
+                                println!("{}", color("요약이 비어 있어 컴팩트를 취소했습니다. (기존 세션 유지)"));
+                            }
+                            Err(e) => {
+                                println!("{}", color(&format!("컴팩트 실패 (기존 세션 유지): {e}")));
+                            }
+                        }
+                    }
                     continue;
                 }
                 "" => {
@@ -1012,6 +1156,118 @@ fn with_status_note(content: String, note: &str) -> String {
     }
 }
 
+/// `/session-info` — 현재 세션 정보 텍스트 (id·cwd·모델·컨텍스트 사용량).
+fn session_info_text(session: &session::Session, context_tokens: u64) -> String {
+    let est = session.estimate_tokens();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let mut out = String::new();
+    out.push_str(&format!("세션 id: {}", session.session_id));
+    out.push_str(&format!("\ncwd: {cwd}"));
+    out.push_str(&format!("\n엔드포인트: {}", session.endpoint));
+    out.push_str(&format!("\n모델: {}", session.model));
+    out.push_str(&format!("\n턴 수: {}", session.turns.len()));
+    match est.checked_mul(100).and_then(|v| v.checked_div(context_tokens)) {
+        Some(pct) => {
+            let pct = pct.min(999);
+            out.push_str(&format!("\n컨텍스트 사용량: ~{est} / {context_tokens} 토큰 (약 {pct}%)"));
+        }
+        None => {
+            out.push_str(&format!("\n컨텍스트 사용량: ~{est} 토큰 (추정 — 엔드포인트 context_tokens 미설정)"));
+        }
+    }
+    out.push_str(&format!("\n생성: {}", session.created_at));
+    out.push_str(&format!("\n마지막 갱신: {}", session.updated_at));
+    out
+}
+
+/// `/sessions` — 세션 목록 텍스트.
+fn sessions_list_text() -> String {
+    match session::list() {
+        Ok(metas) if metas.is_empty() => "세션이 없습니다.".to_string(),
+        Ok(metas) => {
+            let mut out = String::new();
+            for m in &metas {
+                out.push_str(&format!(
+                    "{}  턴={}  모델={}  갱신={}\n",
+                    m.id, m.turns, m.model, m.updated_at
+                ));
+            }
+            out
+        }
+        Err(e) => format!("세션 목록 조회 실패: {e}"),
+    }
+}
+
+/// `/fork` — 현재 세션을 새 id 로 복제해 저장한다.
+fn fork_session(sess: &session::Session) -> Result<String, String> {
+    let new_id = make_uuid();
+    let forked = sess.fork(&new_id);
+    session::save(&forked).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "세션을 분기했습니다. 새 세션 id: {new_id} (재개: /resume {new_id})"
+    ))
+}
+
+/// `/export` — 대화 기록을 마크다운 파일로 내보낸다.
+/// `path_arg` 가 비면 `./bulti-session-<id>.md` 로 저장한다.
+fn export_session(sess: &session::Session, path_arg: &str) -> Result<String, String> {
+    let path = if path_arg.trim().is_empty() {
+        format!("./bulti-session-{}.md", sess.session_id)
+    } else {
+        path_arg.trim().to_string()
+    };
+    std::fs::write(&path, sess.export_markdown()).map_err(|e| e.to_string())?;
+    Ok(format!("대화 기록을 {path} (으)로 내보냈습니다."))
+}
+
+/// `/compact` — 대화 기록을 LLM 한 번 호출로 요약한다.
+/// 스트림 모드(동기 아닌 async)와 TUI 스레드(block_on)에서 공용으로 쓴다.
+async fn compact_transcript(
+    client: &LlmClient,
+    endpoint: &EndpointConfig,
+    transcript: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let instruction = "아래 대화 기록을 간결하게 요약하세요. \
+결정·사실·수정된 파일·미해결 문제를 빠짐없이 담되 불필요한 대화는 압축하세요. \
+요약만 출력하고 다른 설명은 붙이지 마세요.\n\n[대화 기록]\n";
+    let req = crate::llm::ChatRequest {
+        model: endpoint.model.clone(),
+        messages: vec![crate::llm::Message {
+            role: "user".to_string(),
+            content: Some(format!("{instruction}{transcript}")),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }],
+        tools: vec![],
+        stream: true,
+        max_tokens: 4096,
+        temperature: Some(0.2),
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        reasoning_effort: None,
+    };
+    let opts = crate::llm::ChatOptions {
+        endpoint: endpoint.clone(),
+        temperature: None,
+    };
+    let resp = client.chat(&opts, &req, None).await?;
+    Ok(resp.content.unwrap_or_default())
+}
+
+/// `/compact` 성공 시 세션 턴을 단일 요약 기록으로 압축한다.
+fn apply_compact(sess: &mut session::Session, summary: String) {
+    sess.turns = vec![session::TurnRecord {
+        turn: 0,
+        user: "[컴팩트된 대화 요약]".to_string(),
+        assistant: summary,
+        chain_id: "compact".to_string(),
+        files_touched: vec![],
+    }];
+}
+
 /// 내부 명령 도움말 출력.
 fn print_help() {
     println!("내부 명령:");
@@ -1020,6 +1276,11 @@ fn print_help() {
     println!("  /resume <id>     — 세션 재개");
     println!("  /model <name> [effort] — 모델 전환 (effort: low|medium|high)");
     println!("  /effort <low|medium|high> — reasoning effort 설정");
+    println!("  /session-info      — 현재 세션 정보 (id·모델·컨텍스트 사용량)");
+    println!("  /sessions          — 세션 목록 조회");
+    println!("  /compact           — 대화 기록을 요약으로 압축");
+    println!("  /fork              — 현재 세션을 분기 (새 id 로 복제)");
+    println!("  /export [파일경로] — 대화 기록 마크다운으로 내보내기");
     println!("  /help            — 이 도움말");
     println!("  Ctrl-D           — 대화 종료 (EOF)");
     println!("  Ctrl+C           — 중단 후 종료");
