@@ -55,6 +55,8 @@ pub struct ChatLine {
     pub text: String,
     /// 모델 추론 중간 생각 (응답 생성 중에만 표시, 완료 시 접혀서 저장).
     pub reasoning_content: String,
+    /// reasoning 접기/펼침 상태 (`t` 키로 토글, 기본 접힘).
+    pub reasoning_expanded: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u64,
@@ -241,6 +243,8 @@ where
                         role: Role::Assistant,
                         text: turn.assistant_content.clone(),
                         reasoning_content: turn.reasoning_content.clone(),
+                        // 완료 후 reasoning 은 접힌 상태로 저장한다.
+                        reasoning_expanded: false,
                         input_tokens: turn.input_tokens,
                         output_tokens: turn.output_tokens,
                         duration_ms: turn.duration_ms,
@@ -357,6 +361,8 @@ where
                     role: Role::Assistant,
                     text: String::new(),
                     reasoning_content: String::new(),
+                    // 생성 중 reasoning 은 자동으로 펼쳐서 실시간 표시한다.
+                    reasoning_expanded: true,
                     ..ChatLine::default()
                 });
                 offset_from_bottom = 0;
@@ -403,6 +409,13 @@ where
                             text_completion_active = false;
                         }
                     }
+                }
+            }
+            // 가장 마지막 Assistant 줄의 reasoning 접기/펼침 토글.
+            // `Char(c)` arm 보다 앞에 두면 't' 가 입력창에 들어가지 않는다.
+            KeyCode::Char('t') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(last) = lines.iter_mut().rev().find(|l| l.role == Role::Assistant) {
+                    last.reasoning_expanded = !last.reasoning_expanded;
                 }
             }
             KeyCode::Char(c) => {
@@ -571,13 +584,30 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_fr
                 ]));
             }
         }
-        // 모델 생각(reasoning) — 응답 생성 중에만 펼쳐 표시하고, 완료된 응답은
-        // "🤔 생각 보기" 한 줄로 접어서 저장한다.
+        // 모델 생각(reasoning) — 생성 중에는 펼쳐서 실시간 표시하고, 완료 후엔
+        // "🤔 생각" 한 줄로 접는다. `t` 키로 접기/펼침 토글.
         if !l.reasoning_content.trim().is_empty() {
-            text_lines.push(Line::from(vec![Span::styled(
-                format!("🤔 생각 ({}자)", l.reasoning_content.chars().count()),
-                Style::default().fg(Color::DarkGray),
-            )]));
+            if l.reasoning_expanded {
+                let blocks = crate::render::parse(&l.reasoning_content);
+                let dim = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
+                for rline in crate::render::render_lines(&blocks) {
+                    let spans: Vec<Span<'static>> = rline
+                        .spans
+                        .iter()
+                        .map(|s| Span::styled(s.content.clone(), dim))
+                        .collect();
+                    for wrapped in wrap_spans(&spans, text_width) {
+                        text_lines.push(Line::from(wrapped));
+                    }
+                }
+            } else {
+                text_lines.push(Line::from(vec![Span::styled(
+                    format!("🤔 생각 ({}자) — 펼치기", l.reasoning_content.chars().count()),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
         }
     }
 

@@ -149,6 +149,16 @@ fn tool_call_chunk() -> serde_json::Value {
     })
 }
 
+/// 일반 채팅 요청용 SSE chunk (reasoning/thinking 출력).
+#[allow(dead_code)]
+fn reasoning_chunk() -> serde_json::Value {
+    json!({
+        "choices": [{
+            "delta": {"reasoning_content": " Step 1: 분석\nStep 2: 해결"}
+        }]
+    })
+}
+
 /// 일반 채팅 요청용 SSE chunk (도구 결과 후 내용 출력).
 fn content_chunk() -> serde_json::Value {
     json!({
@@ -550,4 +560,84 @@ async fn chat_turn_end_to_end() {
     let run = history::get_run(&conn, rows[0].id).unwrap().unwrap();
     assert!(run.session_id.is_some());
     assert_eq!(run.session_id.as_deref(), Some("sess-1"));
+}
+
+/// `run_turn` 이 SSE `reasoning_content` 델타를 `TurnResult.reasoning_content`
+/// 에 누적해 반환하는지 검증한다.
+#[tokio::test]
+async fn chat_turn_reasoning_content_end_to_end() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use bulti::cli::chat_cmd::run_turn;
+    use bulti::config::{Config, ContextConfig};
+
+    init_test_tracing();
+    let server = MockServer::start().await;
+
+    // reasoning 출력 → 내용 출력을 한 SSE 스트림으로 묶어 응답 (짧은 완료, 핸드오프 없음).
+    // wiremock의 mock별 매칭 순서/상태 문제를 회피하기 위해 두 chunk를 1회 응답으로 전달한다.
+    {
+        use wiremock::Mock;
+        use wiremock::matchers::{body_partial_json, method, path};
+        let chunks = vec![reasoning_chunk(), content_chunk()];
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(json!({"max_tokens": 4096})))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(sse_body(&chunks), "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    // 임시 history DB (격리).
+    let (conn, _dir) = temp_history();
+    let cwd = std::env::temp_dir();
+    let registry = test_registry(&cwd);
+
+    let cfg = Config {
+        version: 1,
+        active_endpoint: None,
+        endpoints: BTreeMap::new(),
+        mcp: BTreeMap::new(),
+        context: ContextConfig {
+            handoff_threshold_pct: 50,
+            max_handoff_depth: 12,
+            handoff_warn_depth: 8,
+        },
+        update: None,
+    };
+
+    let client = LlmClient::new();
+    let endpoint = test_endpoint(&server.uri());
+    let interrupted = Arc::new(AtomicBool::new(false));
+
+    let turn = run_turn(
+        &client,
+        &conn,
+        &registry,
+        "시스템 프롬프트",
+        "프롬프트".to_string(),
+        &endpoint,
+        "mock",
+        &cfg,
+        "chain-reasoning",
+        "session-chain",
+        "sess-reasoning".to_string(),
+        0,
+        interrupted,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // reasoning_content 누적 검증.
+    assert_eq!(turn.exit_code, 0);
+    assert!(!turn.reasoning_content.is_empty());
+    assert!(turn.reasoning_content.contains("분석"));
 }

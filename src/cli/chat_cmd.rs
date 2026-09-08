@@ -766,6 +766,14 @@ async fn chat_loop(
 
         // 스트림 텍스트 모드: 턴 결과를 여기서만 stdout 에 출력한다.
         // TUI 경로는 run_turn 을 직접 호출하지 않고 processor 반환값을 그린다.
+        if !turn_result.reasoning_content.trim().is_empty() {
+            let reasoning = if use_color {
+                format!("\x1b[2m[생각] {}\x1b[0m", turn_result.reasoning_content)
+            } else {
+                format!("[생각] {}", strip_ansi(&turn_result.reasoning_content))
+            };
+            println!("\n{reasoning}");
+        }
         if !turn_result.assistant_content.trim().is_empty() {
             let blocks = crate::render::parse(&turn_result.assistant_content);
             let rendered = crate::render::render_ansi(&blocks);
