@@ -65,8 +65,8 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// reasoning·content 델타를 누적해 `render::parse`+`render_ansi` 로 부분 렌더하고
 /// stdout 에 점진 출력한다.
 ///
-/// - reasoning 은 `[생각]` 머리글로 별도 구분 (use_color 시 dim). content 스트림
-///   시작 시점에 한 번에 쓴다.
+/// - reasoning 은 `[생각]` 머리글로 별도 구분 (use_color 시 dim). content 와
+///   같은 **안정 접두** 방식(`\n\n` 경계)으로 점진 플러시한다.
 /// - content 는 **안정 접두**만 쓴다. markdown 파서는 마지막 빈 줄 이후의 문단을
 ///   아직 닫히지 않은 블록으로 취급해, 같은 입력 접두라도 나중에 다른 행으로
 ///   재렌더될 수 있다. 따라서 마지막 빈 줄 경계(이전 출력에 영향을 주지 않는
@@ -80,6 +80,8 @@ struct StreamPrinter {
     printed: String,
     /// content 의 안정 접두 길이 (마지막 빈 줄 경계, 바이트).
     stable_len: usize,
+    /// reasoning 의 안정 접두 길이 (마지막 빈 줄 경계, 바이트).
+    reasoning_stable_len: usize,
     /// 어떤 델타라도 받은 적이 있는지 (false 면 호출부가 일괄 출력 폴백).
     active: bool,
 }
@@ -92,6 +94,7 @@ impl StreamPrinter {
             content: String::new(),
             printed: String::new(),
             stable_len: 0,
+            reasoning_stable_len: 0,
             active: false,
         }
     }
@@ -107,21 +110,21 @@ impl StreamPrinter {
         }
     }
 
-    /// reasoning_content 델타를 누적한다 (content 시작 시점에 출력).
+    /// reasoning_content 델타를 누적해 점진 출력한다.
+    ///
+    /// content 와 동일한 안정 접두 방식: `\n\n` 경계까지의 접두만 플러시한다.
+    /// reasoning 은 markdown 렌더 없이 `[생각]` 머리글 + 원본 줄 구조 그대로
+    /// 출력하므로, 경계 앞 접두의 렌더는 이후 arriving 텍스트에 의해 불변이다.
     fn print_reasoning(&mut self, text: &str) {
         self.active = true;
         self.reasoning.push_str(text);
+        self.flush_reasoning();
     }
 
     /// content 델타를 누적해 점진 출력한다.
     fn print_content(&mut self, text: &str) {
         self.active = true;
         self.content.push_str(text);
-        // content 가 시작되는 순간 reasoning 을 먼저 쓴다 (기존 일괄 출력 순서 유지).
-        if !self.reasoning.trim().is_empty() && self.printed.is_empty() {
-            self.printed = self.render_reasoning();
-            let _ = std::io::stdout().write_all(self.printed.as_bytes());
-        }
         self.flush();
     }
 
@@ -144,7 +147,7 @@ impl StreamPrinter {
         true
     }
 
-    /// 안정 접두 경계가 앞으로 이동하면 그 부분 렌더의 접미사를 플러시한다.
+    /// content 의 안정 접두 경계가 앞으로 이동하면 그 부분 렌더의 접미사를 플러시한다.
     fn flush(&mut self) {
         let stable = Self::stable_prefix_len(&self.content);
         if stable <= self.stable_len {
@@ -160,19 +163,36 @@ impl StreamPrinter {
         self.stable_len = stable;
     }
 
-    /// [생각] 머리글 렌더 (reasoning 비어 있으면 "").
+    /// reasoning 의 안정 접두 경계가 앞으로 이동하면 그 부분 렌더의 접미사를 플러시한다.
+    ///
+    /// reasoning 은 markdown 렌더 없이 원본 텍스트를 그대로 내보내는 한,
+    /// `\n\n` 경계 앞 접두의 렌더는 이후 arriving reasoning 에 의해 불변이므로
+    /// content 와 동일한 접두 비교(strip_prefix)가 안전하다.
+    fn flush_reasoning(&mut self) {
+        let stable = Self::stable_prefix_len(&self.reasoning);
+        if stable <= self.reasoning_stable_len {
+            return;
+        }
+        let rendered = self.render();
+        let Some(suffix) = rendered.strip_prefix(&self.printed) else {
+            return;
+        };
+        let _ = std::io::stdout().write_all(suffix.as_bytes());
+        let _ = std::io::stdout().flush();
+        self.printed = rendered;
+        self.reasoning_stable_len = stable;
+    }
+
+    /// [생각] 머리글 + reasoning 본문 렌더 (reasoning 비어 있으면 "").
+    ///
+    /// 머리글은 reasoning 이 비어 있지 않으면 항상 상수(불변 접두)로 유지된다.
     fn render_reasoning(&self) -> String {
         if self.reasoning.trim().is_empty() {
             return String::new();
         }
         let dim = if self.use_color { "\x1b[2m" } else { "" };
         let reset = if self.use_color { "\x1b[0m" } else { "" };
-        format!(
-            "{}[생각] {}{}\n",
-            dim,
-            strip_ansi(&self.reasoning),
-            reset
-        )
+        format!("{dim}[생각] {}\n{reset}\n", strip_ansi(&self.reasoning))
     }
 
     /// [생각] 머리글 + markdown 렌더로 전체 출력을 조립한다.
