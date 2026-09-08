@@ -231,6 +231,75 @@ pub fn resolve_alias(cmd: &str) -> &'static str {
     ""
 }
 
+/// `line` 의 첫 토큰(커맨드명, `/` 접두 제외)을 반환한다.
+/// 미지원 커맨드는 `parse` 가 canonical name 을 빈 문자열로 되돌리기 때문에
+/// 오타 제안용 원본 이름이 필요하다.
+pub fn raw_name(line: &str) -> &str {
+    let t = line.trim();
+    let body = t.strip_prefix('/').unwrap_or(t);
+    body.split_whitespace().next().unwrap_or("")
+}
+
+/// 오타가 의심되는 입력에 대해 유사한 커맨드(canonical name)를 제안한다.
+/// Levenshtein 거리 기준으로 짧은 이름은 1, 긴 이름은 최대 2까지 허용하며,
+/// name·alias 를 모두 후보로 본다. 최대 3개, 거리가 가까운 순.
+pub fn suggest_similar(input: &str) -> Vec<String> {
+    let q = input.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    // 입력 길이에 비례해 허용 거리를 늘린다. 짧은 이름(3자)은 오타 1자만,
+    // 4자 이상은 위치 교환 등 오타 2자까지 허용한다.
+    let threshold = (q.len() + 3) / 4;
+    let mut scored: Vec<(usize, &str)> = Vec::new();
+    for cmd in COMMANDS {
+        let mut best = usize::MAX;
+        for n in std::iter::once(cmd.name).chain(cmd.aliases.iter().copied()) {
+            let d = levenshtein(&n.to_lowercase(), &q);
+            if d < best {
+                best = d;
+            }
+        }
+        if best <= threshold {
+            scored.push((best, cmd.name));
+        }
+    }
+    scored.sort();
+    let mut out: Vec<String> = Vec::new();
+    for (_, name) in scored {
+        if !out.iter().any(|s: &String| s == name) {
+            out.push(name.to_string());
+        }
+        if out.len() == 3 {
+            break;
+        }
+    }
+    out
+}
+
+/// 정규 Levenshtein 편집 거리 (의존성 없는 2행 DP).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// `cmd` 가 지원되는지 여부.
 pub fn is_supported(cmd: &str) -> bool {
     !resolve_alias(cmd).is_empty()
@@ -302,5 +371,41 @@ mod tests {
         assert!(fuzzy_match("model", "mdl"));
         assert!(fuzzy_match("resume", "rs"));
         assert!(!fuzzy_match("model", "xyz"));
+    }
+
+    #[test]
+    fn raw_name_extracts_first_token() {
+        assert_eq!(raw_name("/model gpt-4"), "model");
+        assert_eq!(raw_name("/xyz"), "xyz");
+        assert_eq!(raw_name("  /help  "), "help");
+        assert_eq!(raw_name("/"), "");
+        assert_eq!(raw_name("/unknown args here"), "unknown");
+    }
+
+    #[test]
+    fn suggest_similar_finds_typo_commands() {
+        // 한 글자 오타.
+        let s = suggest_similar("resum");
+        assert!(s.iter().any(|x| x == "resume"), "got {s:?}");
+        let s = suggest_similar("hel");
+        assert!(s.iter().any(|x| x == "help"), "got {s:?}");
+        // alias 오타도 canonical name 으로 제안.
+        let s = suggest_similar("modle");
+        assert!(s.iter().any(|x| x == "model"), "got {s:?}");
+        // 거리가 먼 입력에는 제안이 없다.
+        assert!(suggest_similar("zzzzzzzz").is_empty());
+        assert!(suggest_similar("").is_empty());
+        // 제안은 최대 3개.
+        assert!(suggest_similar("sessions").len() <= 3);
+    }
+
+    #[test]
+    fn levenshtein_distance_is_correct() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("abc", "abc"), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        // 문자 위치 교환(transposition)은 표준 Levenshtein에서 2 (삭제+삽입).
+        assert_eq!(levenshtein("model", "modle"), 2);
     }
 }

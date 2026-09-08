@@ -531,8 +531,20 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     }
                 }
                 "resume" => {
+                    // 세션 id 지정은 TUI 에서 세션을 교체할 수 없으므로 안내만.
+                    // 단독 입력이면 사용 가능한 세션 목록을 제안한다.
+                    let msg = if args_str.is_empty() {
+                        format!(
+                            "{}\n(TUI 에서 세션 재개는 지원하지 않습니다 — 종료 후 bulti chat --resume <id> 로 재개하세요.)",
+                            resume_suggest_text()
+                        )
+                    } else {
+                        format!(
+                            "TUI 에서 세션 '{args_str}' 재개는 지원하지 않습니다 (종료 후 bulti chat --resume {args_str} 로 재개하세요)."
+                        )
+                    };
                     crate::tui::CommandResult {
-                        message: "/resume 은 TUI 에서 지원하지 않습니다 (종료 후 --resume 으로 재개하세요).".to_string(),
+                        message: msg,
                         exit: false,
                     }
                 }
@@ -753,11 +765,16 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         exit: false,
                     }
                 }
-                _ => crate::tui::CommandResult {
-                    message: format!(
-                        "지원하지 않는 커맨드 '{line}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."
-                    ),
-                    exit: false,
+                _ => {
+                    // 미지원 커맨드 안내 + 유사 커맨드 제안.
+                    let raw = crate::slash::raw_name(line);
+                    crate::tui::CommandResult {
+                        message: format!(
+                            "지원하지 않는 커맨드 '{line}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
+                            similar_suggestion_text(raw)
+                        ),
+                        exit: false,
+                    }
                 },
             }
         };
@@ -915,10 +932,8 @@ async fn chat_loop(
                 }
                 "resume" => {
                     if args_str.is_empty() {
-                        println!(
-                            "{}",
-                            color("/resume 을 사용하려면 세션 id 가 필요합니다 — 예: /resume <id>")
-                        );
+                        // 세션 id 미지정: 사용 가능한 세션 목록을 제안한다.
+                        println!("{}", color(&resume_suggest_text()));
                     } else {
                         match session::load(args_str) {
                             Ok(s) => {
@@ -1079,18 +1094,26 @@ async fn chat_loop(
                     continue;
                 }
                 "" => {
-                    // 미지원 슬래시 커맨드 안내.
+                    // 미지원 슬래시 커맨드 안내 + 유사 커맨드 제안.
+                    let raw = crate::slash::raw_name(prompt_trimmed);
                     println!(
                         "{}",
-                        color(&format!("지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."))
+                        color(&format!(
+                            "지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
+                            similar_suggestion_text(raw)
+                        ))
                     );
                     continue;
                 }
                 _ => {
                     // 이론상 도달하지 않지만 안전 가드.
+                    let raw = crate::slash::raw_name(prompt_trimmed);
                     println!(
                         "{}",
-                        color(&format!("지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."))
+                        color(&format!(
+                            "지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
+                            similar_suggestion_text(raw)
+                        ))
                     );
                     continue;
                 }
@@ -1505,6 +1528,40 @@ fn sessions_list_text() -> String {
         }
         Err(e) => format!("세션 목록 조회 실패: {e}"),
     }
+}
+
+/// 미지원 커맨드 안내 뒤에 붙일 유사 커맨드 제안 텍스트.
+/// 제안이 없으면 빈 문자열을 반환한다.
+fn similar_suggestion_text(raw: &str) -> String {
+    let sims = crate::slash::suggest_similar(raw);
+    if sims.is_empty() {
+        String::new()
+    } else {
+        let list = sims
+            .iter()
+            .map(|s| format!("/{s}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("\n유사한 커맨드: {list}")
+    }
+}
+
+/// `/resume` 단독 입력 시 사용할 수 있는 세션 목록 안내.
+fn resume_suggest_text() -> String {
+    let mut out = String::from("세션 id 를 지정해 주세요. 사용 가능한 세션:");
+    match session::list() {
+        Ok(metas) if metas.is_empty() => out.push_str("\n  (세션이 없습니다)"),
+        Ok(metas) => {
+            for m in metas.iter().take(10) {
+                out.push_str(&format!("\n  /resume {}  (턴={} 모델={})", m.id, m.turns, m.model));
+            }
+            if metas.len() > 10 {
+                out.push_str(&format!("\n  … 외 {}개 (전체 목록: /sessions)", metas.len() - 10));
+            }
+        }
+        Err(e) => out.push_str(&format!("\n  (세션 목록 조회 실패: {e})")),
+    }
+    out
 }
 
 /// `/fork` — 현재 세션을 새 id 로 복제해 저장한다.
