@@ -159,6 +159,14 @@ where
     // 현재 드롭다운이 열려 있는지 별도로 추적한다.
     let mut completion_active = false;
 
+    // 일반 텍스트(히스토리·세션 기반) 자동완성 상태.
+    // 히스토리 후보를 미리 로드해 두고, 입력 중 fuzzy 매칭으로 후보를 뽑는다.
+    let history_sources: Vec<String> = crate::completion::load_history_sources();
+    // 일반 텍스트 자동완성 후보 (슬래시 커맨드와 별도로 관리).
+    let mut text_completions: Vec<crate::completion::CompletionItem> = Vec::new();
+    let mut text_completion_idx: usize = 0;
+    let mut text_completion_active = false;
+
     // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
     // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
     let mut pending_turn: Option<(
@@ -195,6 +203,8 @@ where
 
         terminal.draw(|f| {
             let size = f.area();
+            // 슬래시 드롭다운이 열려 있으면 텍스트 드롭다운은 겹치지 않게 닫는다.
+            let text_dropdown_open = !completion_active && !text_completions.is_empty();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -207,8 +217,16 @@ where
 
             draw_title(f, chunks[0], &options.endpoint_name, &options.model);
             draw_scroll(f, chunks[1], &lines, offset_from_bottom);
-            draw_input(f, chunks[2], &input);
+            // 고스트 텍스트: 슬래시·텍스트 드롭다운이 열리지 않은 상태에서
+            // 히스토리와 접두사 일치하는 최선 후보의 나머지 부분.
+            let ghost = if completion_active || text_dropdown_open {
+                String::new()
+            } else {
+                crate::completion::best_ghost(&input, &history_sources).unwrap_or_default()
+            };
+            draw_input(f, chunks[2], &input, &ghost);
             draw_completions(f, chunks[2], &completions, completion_idx);
+            draw_text_completions(f, chunks[2], &text_completions, text_completion_idx);
             draw_status(f, chunks[3], &options.session_id, saved, last_assistant(&lines));
         })?;
 
@@ -291,6 +309,13 @@ where
                     completion_active = false;
                     continue;
                 }
+                if text_completion_active && !text_completions.is_empty() {
+                    let item = text_completions[text_completion_idx.min(text_completions.len() - 1)].clone();
+                    input = item.insert_text;
+                    text_completions.clear();
+                    text_completion_active = false;
+                    continue;
+                }
                 // 진행 중 턴이 있으면 무시한다 (한 번에 한 턴).
                 if pending_turn.is_some() {
                     continue;
@@ -347,11 +372,15 @@ where
             KeyCode::Backspace => {
                 input.pop();
                 update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
             }
             KeyCode::Tab => {
-                // Tab: 자동완성 선택 항목 순환.
+                // Tab: 자동완성 선택 항목 순환 (슬래시 드롭다운이 열려 있으면
+                // 슬래시 우선, 아니면 텍스트 후보 순환).
                 if completion_active && !completions.is_empty() {
                     completion_idx = (completion_idx + 1) % completions.len();
+                } else if text_completion_active && !text_completions.is_empty() {
+                    text_completion_idx = (text_completion_idx + 1) % text_completions.len();
                 } else {
                     // 자동완성이 없으면 직접 완성 시도.
                     if completions.len() == 1 {
@@ -360,10 +389,15 @@ where
                         completion_active = false;
                     } else {
                         update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                        update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
                         if completions.len() == 1 {
                             input = completions[0].insert.clone();
                             completions.clear();
                             completion_active = false;
+                        } else if text_completions.len() == 1 {
+                            input = text_completions[0].insert_text.clone();
+                            text_completions.clear();
+                            text_completion_active = false;
                         }
                     }
                 }
@@ -374,6 +408,7 @@ where
                 }
                 input.push(c);
                 update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
             }
             KeyCode::PageUp => {
                 offset_from_bottom = offset_from_bottom.saturating_add(10);
@@ -384,6 +419,8 @@ where
             KeyCode::Up => {
                 if completion_active && !completions.is_empty() {
                     completion_idx = completion_idx.saturating_sub(1);
+                } else if text_completion_active && !text_completions.is_empty() {
+                    text_completion_idx = text_completion_idx.saturating_sub(1);
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
                 }
@@ -391,6 +428,8 @@ where
             KeyCode::Down => {
                 if completion_active && !completions.is_empty() {
                     completion_idx = (completion_idx + 1) % completions.len();
+                } else if text_completion_active && !text_completions.is_empty() {
+                    text_completion_idx = (text_completion_idx + 1) % text_completions.len();
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
@@ -399,6 +438,8 @@ where
                 // Esc: 자동완성 드롭다운 취소.
                 completions.clear();
                 completion_active = false;
+                text_completions.clear();
+                text_completion_active = false;
             }
             _ => {}
         }
@@ -506,13 +547,27 @@ fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
     lines.iter().rev().find(|l| l.role == Role::Assistant)
 }
 
-/// 입력창 렌더링.
-fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str) {
-    let p = Paragraph::new(input)
+/// 입력창 렌더링. `ghost` 가 비어 있지 않으면 커서(입력 문자열) 뒤에
+/// dim+italic 고스트 텍스트를 연결해 표시한다.
+fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, ghost: &str) {
+    let spans = if ghost.is_empty() {
+        vec![Span::raw(input.to_string())]
+    } else {
+        vec![
+            Span::raw(input.to_string()),
+            Span::styled(
+                ghost.to_string(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC),
+            ),
+        ]
+    };
+    let p = Paragraph::new(Line::from(spans))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("입력 (Enter 전송 · Ctrl+S 저장 · Ctrl+Q 종료)"),
+                .title("입력 (Enter 전송 · Tab 자동완성 · Ctrl+S 저장 · Ctrl+Q 종료)"),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
@@ -559,6 +614,47 @@ fn draw_completions(
     f.render_widget(p, area);
 }
 
+/// 일반 텍스트(히스토리·세션) 자동완성 드롭다운 렌더링.
+fn draw_text_completions(
+    f: &mut ratatui::Frame,
+    input_area: Rect,
+    completions: &[crate::completion::CompletionItem],
+    idx: usize,
+) {
+    if completions.is_empty() {
+        return;
+    }
+    let items = &completions[..completions.len().min(6)];
+    let height = items.len() as u16 + 1; // 제목 1줄 + 항목
+    let y = input_area.y.saturating_sub(height);
+    if y == 0 || y > input_area.y {
+        return;
+    }
+    let area = Rect::new(input_area.x, y, input_area.width, height);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "히스토리 자동완성 (Enter 선택 · Tab/↑↓ 이동 · Esc 취소)",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )]));
+    for (i, it) in items.iter().enumerate() {
+        let selected = i == idx.min(completions.len() - 1);
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "▶ " } else { "  " }, style),
+            Span::styled(it.display.clone(), style),
+            Span::styled(format!("  — {}", it.description), style),
+        ]));
+    }
+    let p = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().bg(Color::DarkGray));
+    f.render_widget(p, area);
+}
+
 /// `/` 입력 시 자동완성 상태를 갱신한다. `/` 가 아니면 드롭다운을 닫는다.
 fn update_completions(
     completions: &mut Vec<crate::slash::Suggestion>,
@@ -577,6 +673,27 @@ fn update_completions(
         completions.clear();
         *active = false;
     }
+}
+
+/// 일반 텍스트 자동완성 후보를 갱신한다.
+/// 슬래시 입력이면(슬래시 드롭다운이 담당) 후보를 비우고,
+/// 아니면 fuzzy 매칭으로 히스토리 후보를 채운다.
+fn update_text_completions(
+    completions: &mut Vec<crate::completion::CompletionItem>,
+    idx: &mut usize,
+    active: &mut bool,
+    input: &str,
+    sources: &[String],
+) {
+    let trimmed = input.trim();
+    if input.starts_with('/') || trimmed.is_empty() || trimmed.chars().count() < 2 {
+        completions.clear();
+        *active = false;
+        return;
+    }
+    *completions = crate::completion::find_matches(input, sources, 6);
+    *idx = 0;
+    *active = !completions.is_empty();
 }
 
 /// 상태 표시 — 세션 id·저장 여부·최근 응답 토큰/속도.
@@ -695,6 +812,50 @@ mod tests {
         let mut idx = 0usize;
         let mut active = true;
         update_completions(&mut completions, &mut idx, &mut active, "hello");
+        assert!(!active);
+        assert!(completions.is_empty());
+    }
+
+    /// 일반 텍스트 자동완성: 2자 이상 입력 시 fuzzy 후보가 채워진다.
+    #[test]
+    fn update_text_completions_finds_history_matches() {
+        let sources = vec![
+            "안녕하세요 반갑습니다".to_string(),
+            "오늘 날씨 알려줘".to_string(),
+        ];
+        let mut completions = Vec::new();
+        let mut idx = 0usize;
+        let mut active = false;
+        update_text_completions(&mut completions, &mut idx, &mut active, "안녕", &sources);
+        assert!(active);
+        assert!(completions.iter().any(|c| c.insert_text == "안녕하세요 반갑습니다"));
+    }
+
+    /// 슬래시 입력이면 텍스트 자동완성 후보를 비운다.
+    #[test]
+    fn update_text_completions_clears_on_slash() {
+        let sources = vec!["안녕하세요".to_string()];
+        let mut completions = vec![crate::completion::CompletionItem {
+            display: "안녕하세요".to_string(),
+            description: "히스토리".to_string(),
+            insert_text: "안녕하세요".to_string(),
+            replace_range: None,
+        }];
+        let mut idx = 0usize;
+        let mut active = true;
+        update_text_completions(&mut completions, &mut idx, &mut active, "/ex", &sources);
+        assert!(!active);
+        assert!(completions.is_empty());
+    }
+
+    /// 1자 이하 입력은 후보를 채우지 않는다.
+    #[test]
+    fn update_text_completions_ignores_single_char() {
+        let sources = vec!["안녕하세요".to_string()];
+        let mut completions = Vec::new();
+        let mut idx = 0usize;
+        let mut active = false;
+        update_text_completions(&mut completions, &mut idx, &mut active, "안", &sources);
         assert!(!active);
         assert!(completions.is_empty());
     }
