@@ -276,6 +276,8 @@ where
 
     let mut lines = initial_lines;
     let mut input = String::new();
+    // 입력창 커서 위치 (문자 인덱스 기준). 좌/우·Home/End·단어 이동으로 바뀐다.
+    let mut cursor = 0usize;
     let mut offset_from_bottom: usize = 0;
     let mut saved = false;
 
@@ -367,7 +369,7 @@ where
             } else {
                 crate::completion::best_ghost(&input, &history_sources).unwrap_or_default()
             };
-            draw_input(f, chunks[2], &input, &ghost, multiline);
+            draw_input(f, chunks[2], &input, cursor, &ghost, multiline);
             draw_completions(f, chunks[2], &completions, completion_idx);
             draw_text_completions(f, chunks[2], &text_completions, text_completion_idx);
             let total_in: u64 = lines.iter().map(|l| l.input_tokens).sum();
@@ -471,14 +473,16 @@ where
                 // 자동완성 드롭다운이 열려 있으면 Enter 로 선택.
                 if completion_active && !completions.is_empty() {
                     let item = completions[completion_idx.min(completions.len() - 1)].clone();
-                    input = item.insert;
+                    set_input(&mut input, &mut cursor, item.insert);
                     completions.clear();
                     completion_active = false;
                     continue;
                 }
                 if text_completion_active && !text_completions.is_empty() {
-                    let item = text_completions[text_completion_idx.min(text_completions.len() - 1)].clone();
-                    input = item.insert_text;
+                    let item =
+                        text_completions[text_completion_idx.min(text_completions.len() - 1)]
+                            .clone();
+                    set_input(&mut input, &mut cursor, item.insert_text);
                     text_completions.clear();
                     text_completion_active = false;
                     continue;
@@ -492,7 +496,7 @@ where
                     && (modifiers.contains(KeyModifiers::SHIFT)
                         || modifiers.contains(KeyModifiers::ALT))
                 {
-                    input.push('\n');
+                    insert_char(&mut input, &mut cursor, '\n');
                     continue;
                 }
                 let trimmed = input.trim().to_string();
@@ -514,9 +518,11 @@ where
                     });
                     offset_from_bottom = 0;
                     input.clear();
+                    cursor = 0;
                     continue;
                 }
                 input.clear();
+                cursor = 0;
                 // 슬래시 커맨드면 processor 대신 command_handler 로 처리한다
                 // (모델 변경·effort·종료 등).
                 if trimmed.starts_with('/') {
@@ -567,13 +573,19 @@ where
                 pending_turn = Some((rx, handle));
             }
             KeyCode::Backspace => {
-                if multiline && input.ends_with('\n') {
-                    // 멀티라인: 줄바꿈을 한 번에 지운다 (마지막 비어 있는 줄 삭제).
-                    input.pop();
-                    input.pop();
-                } else {
-                    input.pop();
+                if multiline && input.as_bytes().get(cursor) == Some(&b'\n') {
+                    // 멀티라인: 커서 위치의 줄바꿈을 한 번에 지운다 (줄 병합).
+                    input.replace_range(cursor..cursor + 1, "");
+                    continue;
                 }
+                delete_back(&mut input, &mut cursor);
+                if !multiline {
+                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
+                }
+            }
+            KeyCode::Delete => {
+                delete_fwd(&mut input, &mut cursor);
                 if !multiline {
                     update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
                     update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
@@ -589,18 +601,18 @@ where
                 } else {
                     // 자동완성이 없으면 직접 완성 시도.
                     if completions.len() == 1 {
-                        input = completions[0].insert.clone();
+                        set_input(&mut input, &mut cursor, completions[0].insert.clone());
                         completions.clear();
                         completion_active = false;
                     } else {
                         update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
                         update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
                         if completions.len() == 1 {
-                            input = completions[0].insert.clone();
+                            set_input(&mut input, &mut cursor, completions[0].insert.clone());
                             completions.clear();
                             completion_active = false;
                         } else if text_completions.len() == 1 {
-                            input = text_completions[0].insert_text.clone();
+                            set_input(&mut input, &mut cursor, text_completions[0].insert_text.clone());
                             text_completions.clear();
                             text_completion_active = false;
                         }
@@ -614,11 +626,18 @@ where
                     last.reasoning_expanded = !last.reasoning_expanded;
                 }
             }
+            // Ctrl+A/E: 라인 시작/끝 (Char(c) arm 보다 앞에 둬야 도달 가능).
+            KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+                cursor = 0;
+            }
+            KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                cursor = input.len();
+            }
             KeyCode::Char(c) => {
                 if modifiers.contains(KeyModifiers::CONTROL) {
                     continue;
                 }
-                input.push(c);
+                insert_char(&mut input, &mut cursor, c);
                 if !multiline {
                     update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
                     update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
@@ -638,9 +657,13 @@ where
                 } else if input.trim().is_empty() && !history_sources.is_empty() {
                     // 히스토리 탐색: 빈 입력에서 ↑ 로 이전 프롬프트를 거슬러 올라간다.
                     history_idx = step_history(&history_sources, history_idx, true);
-                    input = history_idx
-                        .map(|i| history_sources[i].clone())
-                        .unwrap_or_default();
+                    set_input(
+                        &mut input,
+                        &mut cursor,
+                        history_idx
+                            .map(|i| history_sources[i].clone())
+                            .unwrap_or_default(),
+                    );
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
                 }
@@ -653,12 +676,61 @@ where
                 } else if input.trim().is_empty() && history_idx.is_some() {
                     // 히스토리 탐색 종료: ↓ 로 최신 방향으로 내려가다 끝나면 입력창 비움.
                     history_idx = step_history(&history_sources, history_idx, false);
-                    input = history_idx
-                        .map(|i| history_sources[i].clone())
-                        .unwrap_or_default();
+                    set_input(
+                        &mut input,
+                        &mut cursor,
+                        history_idx
+                            .map(|i| history_sources[i].clone())
+                            .unwrap_or_default(),
+                    );
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
+            }
+            KeyCode::Left
+                if !modifiers.contains(KeyModifiers::ALT)
+                    && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if cursor > 0 {
+                    cursor -= 1;
+                } else if !multiline {
+                    // 입력 경계에서 ← 는 대화 스크롤 (기존 동작 유지).
+                    offset_from_bottom = offset_from_bottom.saturating_add(1);
+                }
+            }
+            KeyCode::Right
+                if !modifiers.contains(KeyModifiers::ALT)
+                    && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if cursor < input.len() {
+                    cursor += 1;
+                } else if !multiline {
+                    offset_from_bottom = offset_from_bottom.saturating_sub(1);
+                }
+            }
+            // 단어 이동: Alt+←/→ (Meta) 또는 Ctrl+←/→.
+            KeyCode::Left
+                if modifiers.contains(KeyModifiers::ALT)
+                    || modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if !move_cursor_word(&input, &mut cursor, false) && !multiline {
+                    offset_from_bottom = offset_from_bottom.saturating_add(1);
+                }
+            }
+            KeyCode::Right
+                if modifiers.contains(KeyModifiers::ALT)
+                    || modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if !move_cursor_word(&input, &mut cursor, true) && !multiline {
+                    offset_from_bottom = offset_from_bottom.saturating_sub(1);
+                }
+            }
+            // 라인 시작/끝: Home/End (Ctrl+A/E 는 위 Char arm에서 처리).
+            KeyCode::Home => {
+                cursor = 0;
+            }
+            KeyCode::End => {
+                cursor = input.len();
             }
             KeyCode::Esc => {
                 // Esc: 자동완성 드롭다운 취소.
@@ -687,6 +759,138 @@ fn draw_title(f: &mut ratatui::Frame, area: Rect, endpoint_name: &str, model: &s
 #[cfg(test)]
 fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+}
+
+/// 입력창 커서(단일 라인 편집) 헬퍼. `cursor` 는 문자 인덱스 기준이며
+/// 표시 폭(ASCII 1 / 그 외 2)으로 계산한 열(column)을 반환한다.
+
+/// 입력 문자열을 교체하고 커서를 끝으로 옮긴다 (히스토리·자동완성 선택 시).
+fn set_input(input: &mut String, cursor: &mut usize, text: String) {
+    *input = text;
+    *cursor = input.len();
+}
+
+/// `s` 를 바이트 인덱스 `idx` 에서 세 조각으로 나눈다:
+/// (커서 앞, 커서 위치의 한 문자(끝이면 ""), 커서 뒤).
+/// `idx` 는 항상 char boundary (바이트 인덱스) 여야 한다.
+fn split_cursor(s: &str, idx: usize) -> (String, String, String) {
+    let (before, rest) = s.split_at(idx.min(s.len()));
+    if rest.is_empty() {
+        return (before.to_string(), String::new(), String::new());
+    }
+    // rest 의 첫 문자 끝(바이트) 찾기 — UTF-8 lead byte 기준.
+    let b = rest.as_bytes();
+    let end = (1..=b.len())
+        .find(|&i| b[i] < 0b1000_0000 || b[i] >= 0b1100_0000)
+        .unwrap_or(b.len());
+    let (cur, after) = rest.split_at(end);
+    (
+        before.to_string(),
+        cur.to_string(),
+        after.to_string(),
+    )
+}
+
+/// 커서 위치 `cursor` 에 `c` 를 삽입하고 커서를 문자 뒤로 옮긴다.
+fn insert_char(input: &mut String, cursor: &mut usize, c: char) {
+    let pos = (*cursor).min(input.len());
+    input.insert(pos, c);
+    *cursor = pos + c.len_utf8();
+}
+
+/// 커서 앞 문자를 지운다.
+fn delete_back(input: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    // 커서에 붙은 앞쪽 문자(바이트)의 시작 찾기.
+    let start = (0..*cursor).rev().find(|&i| input.is_char_boundary(i)).unwrap_or(0);
+    input.replace_range(start..*cursor, "");
+    *cursor = start;
+}
+
+/// 커서 위치 문자를 지운다 (Delete 키).
+fn delete_fwd(input: &mut String, cursor: &mut usize) {
+    if *cursor >= input.len() {
+        return;
+    }
+    // 커서에 붙은 뒤쪽 문자(바이트)의 끝 찾기.
+    let end = (*cursor..=input.len())
+        .find(|&i| input.is_char_boundary(i) && i > *cursor)
+        .unwrap_or(input.len());
+    input.replace_range(*cursor..end, "");
+}
+
+/// 커서를 한 단어 경계로 이동한다. `forward` 가 참이면 다음 단어 시작,
+/// 아니면 현재 단어 시작(이전 경계)으로 간다. 이동했다면 `true`.
+/// `cursor` 는 바이트 인덱스이며, 단어 판단은 ASCII 바이트 기준으로 한다.
+fn move_cursor_word(input: &str, cursor: &mut usize, forward: bool) -> bool {
+    let n = input.len();
+    // 단어 문자: ASCII 알파벳·숫자·밑줄 (비 ASCII 문자는 단어 취급 안 함).
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    if forward {
+        // 커서 위치의 문자(인덱스 >= cursor인 첫 문자) 찾기.
+        let pos = (*cursor).min(n);
+        let (start, ch) = input
+            .char_indices()
+            .find(|(j, _)| *j >= pos)
+            .unwrap_or((n, '\0'));
+        let next = if is_word_char(ch) {
+            // 단어 안(또는 시작)이면 단어 끝까지.
+            let after = start + ch.len_utf8();
+            input[after..]
+                .char_indices()
+                .find(|(_, c)| !is_word_char(*c))
+                .map(|(j, _)| after + j)
+                .unwrap_or(n)
+        } else {
+            // 공백·기호·한글 등: 한 문자만.
+            (start + ch.len_utf8()).min(n)
+        };
+        if next != *cursor {
+            *cursor = next;
+            return true;
+        }
+        false
+    } else {
+        // 뒤에서 공백을 건너뛴 뒤 마지막 문자 확인.
+        let mut i = (*cursor).min(n);
+        while i > 0 {
+            let (j, ch) = input
+                .char_indices()
+                .rev()
+                .find(|(j, _)| *j < i)
+                .unwrap();
+            if ch == ' ' || ch == '\t' {
+                i = j;
+                continue;
+            }
+            i = j;
+            // 마지막 문자가 단어 문자면 단어 시작까지.
+            if is_word_char(ch) {
+                let mut k = j;
+                while k > 0 {
+                    let (m, c) = input
+                        .char_indices()
+                        .rev()
+                        .find(|(m, _)| *m < k)
+                        .unwrap();
+                    if is_word_char(c) {
+                        k = m;
+                    } else {
+                        break;
+                    }
+                }
+                i = k;
+            }
+            break;
+        }
+        if i != *cursor {
+            *cursor = i;
+            return true;
+        }
+        false
+    }
 }
 
 /// 스패너 스타일을 보존하며 `width` 열에 맞춰 줄바꿈한다.
@@ -874,32 +1078,54 @@ fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
 
 /// 입력창 렌더링. `ghost` 가 비어 있지 않으면 커서(입력 문자열) 뒤에
 /// dim+italic 고스트 텍스트를 연결해 표시한다.
-/// `multiline` 이면 입력을 줄 단위로 나눠 여러 줄로 렌더한다 (고스트 스킵).
-fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, ghost: &str, multiline: bool) {
+/// `cursor` 는 바이트 인덱스이며, 그 위치의 문자를 역색 스팬으로 그려 커서
+/// 를 표시한다 (끝이면 빈 역색 스팬).
+/// `multiline` 이면 입력을 줄 단위로 나눠 여러 줄로 렌더하고, 커서는
+/// `cursor` 가 속한 라인에만 표시한다 (고스트 스킵).
+fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize, ghost: &str, multiline: bool) {
     let title = if multiline {
         "입력 (멀티라인 — Shift+Enter 줄바꿈 · Enter 전송 · /multiline 꺼짐)"
     } else {
         "입력 (Enter 전송 · Tab 자동완성 · Ctrl+S 저장 · Ctrl+Q 종료)"
     };
+    // 커서 표시: [cursor 앞][커서 문자(역색)][cursor 뒤] + (단일라인) 고스트.
+    let inv = Style::default().add_modifier(Modifier::REVERSED);
     let lines: Vec<Line> = if multiline {
+        let mut off = 0usize;
         input
             .split('\n')
-            .map(|l| Line::from(Span::raw(l.to_string())))
+            .map(|l| {
+                let lstart = off;
+                let lend = off + l.len();
+                off += l.len() + 1; // '\n' 바이트 포함
+                let cc = cursor.min(input.len());
+                if cc >= lstart && cc <= lend {
+                    let (before, cur, after) = split_cursor(l, cc - lstart);
+                    Line::from(vec![
+                        Span::raw(before),
+                        Span::styled(cur, inv),
+                        Span::raw(after),
+                    ])
+                } else {
+                    Line::from(Span::raw(l))
+                }
+            })
             .collect()
     } else {
-        let spans = if ghost.is_empty() {
-            vec![Span::raw(input.to_string())]
-        } else {
-            vec![
-                Span::raw(input.to_string()),
-                Span::styled(
-                    ghost.to_string(),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM | Modifier::ITALIC),
-                ),
-            ]
-        };
+        let (before, cur, after) = split_cursor(input, cursor.min(input.len()));
+        let mut spans = vec![
+            Span::raw(before),
+            Span::styled(cur, inv),
+            Span::raw(after),
+        ];
+        if !ghost.is_empty() {
+            spans.push(Span::styled(
+                ghost.to_string(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC),
+            ));
+        }
         vec![Line::from(spans)]
     };
     let p = Paragraph::new(lines)
@@ -1101,6 +1327,122 @@ mod tests {
         assert_eq!(step_history(&h, Some(0), false), None);
         // 비어 있으면 항상 None.
         assert_eq!(step_history(&[], None, true), None);
+    }
+
+    /// insert_char: 커서 위치에 삽입하고 커서를 문자 뒤로.
+    #[test]
+    fn insert_cursor_char() {
+        let mut s = String::new();
+        let mut c = 0;
+        insert_char(&mut s, &mut c, 'b');
+        insert_char(&mut s, &mut c, 'a');
+        assert_eq!((s.as_str(), c), ("ba", 2));
+        // 시작에 삽입.
+        let mut c2 = 0;
+        insert_char(&mut s, &mut c2, 'x');
+        assert_eq!((s.as_str(), c2), ("xba", 1));
+    }
+
+    /// insert_char: 한글 문자는 바이트 인덱스 3 만큼 커서를 넘긴다.
+    #[test]
+    fn insert_char_multibyte() {
+        let mut s = "ab".to_string();
+        let mut c = 1;
+        insert_char(&mut s, &mut c, '한');
+        assert_eq!((s.as_str(), c), ("a한b", 4));
+    }
+
+    /// delete_back: 커서 앞 문자(바이트) 삭제.
+    #[test]
+    fn delete_back_char() {
+        let mut s = "abc".to_string();
+        let mut c = 3;
+        delete_back(&mut s, &mut c);
+        assert_eq!((s.as_str(), c), ("ab", 2));
+        // 한글 앞: 3바이트 삭제.
+        let mut s2 = "a한".to_string();
+        let mut c2 = 4;
+        delete_back(&mut s2, &mut c2);
+        assert_eq!((s2.as_str(), c2), ("a", 1));
+        // 커서 0 이면 아무일도 없음.
+        let mut c3 = 0;
+        delete_back(&mut s2, &mut c3);
+        assert_eq!((s2.as_str(), c3), ("a", 0));
+    }
+
+    /// delete_fwd: 커서 위치 문자(바이트) 삭제, 커서는 유지.
+    #[test]
+    fn delete_fwd_char() {
+        let mut s = "abc".to_string();
+        let mut c = 1;
+        delete_fwd(&mut s, &mut c);
+        assert_eq!((s.as_str(), c), ("ac", 1));
+        // 한글: 3바이트 삭제.
+        let mut s2 = "a한b".to_string();
+        let mut c2 = 1;
+        delete_fwd(&mut s2, &mut c2);
+        assert_eq!((s2.as_str(), c2), ("ab", 1));
+        // 끝에 있으면 아무일도 없음.
+        let mut c3 = 2;
+        delete_fwd(&mut s2, &mut c3);
+        assert_eq!((s2.as_str(), c3), ("ab", 2));
+    }
+
+    /// move_cursor_word: 앞/뒤 단어 경계 이동.
+    #[test]
+    fn move_word_forward() {
+        let s = "hello world";
+        let mut c = 0;
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 5);
+        // 공백 한 문자 건너뛰어 다음 단어 시작.
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 6);
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 11);
+        // 끝에서 더 못 감.
+        assert!(!move_cursor_word(&s, &mut c, true));
+    }
+
+    /// move_cursor_word: 뒤쪽 단어 경계 이동.
+    #[test]
+    fn move_word_backward() {
+        let s = "hello world";
+        let mut c = 11;
+        assert!(move_cursor_word(&s, &mut c, false));
+        assert_eq!(c, 6);
+        assert!(move_cursor_word(&s, &mut c, false));
+        assert_eq!(c, 0);
+        assert!(!move_cursor_word(&s, &mut c, false));
+    }
+
+    /// move_cursor_word: 한글은 한 문자 단위.
+    #[test]
+    fn move_word_korean() {
+        let s = "안녕 세계";
+        let mut c = 0;
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 3); // '안'
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 6); // '녕'
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 7); // 공백
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 10);
+        assert!(move_cursor_word(&s, &mut c, true));
+        assert_eq!(c, 13);
+        assert!(!move_cursor_word(&s, &mut c, true));
+    }
+
+    /// set_input: 입력 교체 + 커서 끝 이동.
+    #[test]
+    fn set_input_moves_cursor_to_end() {
+        let mut s = "old".to_string();
+        let mut c = 1;
+        set_input(&mut s, &mut c, "hello".to_string());
+        assert_eq!((s.as_str(), c), ("hello", 5));
+        set_input(&mut s, &mut c, String::new());
+        assert_eq!((s.as_str(), c), ("", 0));
     }
 
     /// TTY 가 아니면 run_tui 는 None 을 반환한다 (스트림 텍스트 폴백).
