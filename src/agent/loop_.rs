@@ -294,7 +294,40 @@ pub async fn run_segment(
                 let is_state_change = is_state_change_tool(&tc.name);
                 update_after_tool_call(&mut guard, sig, is_state_change);
 
+                // TUI 표시용 "호출 중" 이벤트.
+                if let Some(tx) = delta_tx.as_ref() {
+                    let _ = tx
+                        .send(crate::llm::Delta {
+                            tool_call_event: Some(crate::llm::ToolEvent {
+                                name: tc.name.clone(),
+                                args_summary: tool_args_summary(&tc.arguments),
+                                ok: false,
+                                error: None,
+                            }),
+                            ..Default::default()
+                        });
+                }
+
                 let result = registry.dispatch(&tc.name, tc.arguments.clone()).await;
+                let (ok, error) = match &result {
+                    Ok(_) => (true, None),
+                    Err(e) => (false, Some(e.to_string())),
+                };
+
+                // TUI 표시용 결과 이벤트 (성공/실패).
+                if let Some(tx) = delta_tx.as_ref() {
+                    let _ = tx
+                        .send(crate::llm::Delta {
+                            tool_call_event: Some(crate::llm::ToolEvent {
+                                name: tc.name.clone(),
+                                args_summary: tool_args_summary(&tc.arguments),
+                                ok,
+                                error,
+                            }),
+                            ..Default::default()
+                        });
+                }
+
                 let result_text = match result {
                     Ok(t) => t,
                     Err(e) => format!("오류: {e}"),
@@ -439,6 +472,37 @@ fn is_state_change_tool(name: &str) -> bool {
         name,
         "write_file" | "edit_file" | "bash" | "mcp_call" | "skill_load"
     )
+}
+
+/// 도구 인자 JSON 에서 TUI 한 줄 표시용 요약을 만든다.
+/// 객체면 `key=value` (문자열 값만, 최대 3개) 로 조립하고,
+/// 너무 길면 `…` 으로 잘라낸다.
+fn tool_args_summary(arguments: &serde_json::Value) -> String {
+    let s = match arguments {
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            let parts: Vec<String> = map
+                .iter()
+                .take(3)
+                .filter_map(|(k, v)| {
+                    v.as_str().map(|s| format!("{k}={s}"))
+                })
+                .collect();
+            if parts.is_empty() {
+                arguments.to_string()
+            } else {
+                parts.join(" ")
+            }
+        }
+        _ => arguments.to_string(),
+    };
+    let mut out: String = s
+        .chars()
+        .take(80)
+        .collect::<String>();
+    if s.chars().count() > 80 {
+        out.push('…');
+    }
+    out
 }
 
 /// ToolCall 을 Message.tool_calls 용 ToolCallDelta 로 변환한다.

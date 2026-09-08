@@ -200,6 +200,8 @@ pub struct TurnResult {
 pub enum Role {
     User,
     Assistant,
+    /// 도구 호출 표시 (⚙ 성공 / ✗ 실패).
+    Tool,
     #[default]
     Status,
 }
@@ -334,6 +336,10 @@ where
                         }
                     }
                 }
+                // 도구 호출 이벤트 — "호출 중" 줄을 결과 이벤트로 갱신한다.
+                if let Some(ev) = delta.tool_call_event {
+                    push_tool_event(&mut lines, ev);
+                }
             }
             if got {
                 offset_from_bottom = 0;
@@ -411,6 +417,14 @@ where
                         duration_ms: turn.duration_ms,
                         ..ChatLine::default()
                     });
+                    // 파일 변경 이력을 Status 줄로 명시 표시한다.
+                    if !turn.files_touched.is_empty() {
+                        lines.push(ChatLine {
+                            role: Role::Status,
+                            text: format!("📝 modified: {}", turn.files_touched.join(", ")),
+                            ..ChatLine::default()
+                        });
+                    }
                 }
                 Ok(Err(e)) => {
                     lines.push(ChatLine {
@@ -970,11 +984,13 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &mut [ChatLine], offse
         let prefix = match line.role {
             Role::User => "▶ ",
             Role::Assistant => "◀ ",
+            Role::Tool => "⚙ ",
             Role::Status => "· ",
         };
         let style = match line.role {
             Role::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             Role::Assistant => Style::default().fg(Color::Cyan),
+            Role::Tool => Style::default().fg(Color::Yellow),
             Role::Status => Style::default().fg(Color::DarkGray),
         };
         // Assistant 응답은 마크다운 렌더링을 적용한다 (코드블록·인라인 코드·
@@ -1074,6 +1090,44 @@ pub fn step_history(history: &[String], history_idx: Option<usize>, up: bool) ->
 /// 마지막 Assistant 응답을 찾아 상태 표시줄에 토큰/속도를 보여준다.
 fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
     lines.iter().rev().find(|l| l.role == Role::Assistant)
+}
+
+/// 도구 호출 이벤트를 Tool 줄로 반영한다.
+/// "호출 중" 이벤트(`ok == false`, 에러 없음)는 새 줄을 추가하고, 결과
+/// 이벤트는 마지막 "호출 중" 줄(꼬리 ` …`)을 제자리로 갱신해 한 도구 호출이
+/// 두 줄을 차지하지 않게 한다.
+fn push_tool_event(lines: &mut Vec<ChatLine>, ev: crate::llm::ToolEvent) {
+    let args = if ev.args_summary.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", ev.args_summary)
+    };
+    let text = if ev.ok {
+        format!("{}{}", ev.name, args)
+    } else if let Some(err) = ev.error {
+        format!("✗ {}: {}", ev.name, err)
+    } else {
+        format!("{}{} …", ev.name, args)
+    };
+    let in_flight = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| l.role == Role::Tool && l.text.ends_with(" …"))
+        .map(|(i, _)| i);
+    match in_flight {
+        Some(i) => {
+            lines[i].text = text;
+            lines[i].bump_generation();
+        }
+        None => {
+            lines.push(ChatLine {
+                role: Role::Tool,
+                text,
+                ..ChatLine::default()
+            });
+        }
+    }
 }
 
 /// 입력창 렌더링. `ghost` 가 비어 있지 않으면 커서(입력 문자열) 뒤에

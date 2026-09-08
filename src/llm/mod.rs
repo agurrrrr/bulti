@@ -102,6 +102,20 @@ pub struct ToolCallFunctionDelta {
     pub arguments: Option<String>,
 }
 
+/// TUI 표시용 도구 호출 이벤트 (채널 전용 — SSE 파싱 대상이 아니므로
+/// serde `skip` 처리).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ToolEvent {
+    pub name: String,
+    /// 인자 JSON 에서 핵심 값을 요약한 한 줄.
+    pub args_summary: String,
+    /// `false` 이면 "호출 중" 표시, `true` 면 완료(성공) 표시.
+    pub ok: bool,
+    /// 실패 시 에러 메시지.
+    pub error: Option<String>,
+}
+
 /// SSE delta (stream chunk 의 `.choices[0].delta`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Delta {
@@ -109,6 +123,10 @@ pub struct Delta {
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallDelta>,
+    /// agent 루프가 `delta_tx` 로 보내는 도구 호출 이벤트 (TUI 표시용).
+    /// SSE 응답에서는 항상 `None`.
+    #[serde(default)]
+    pub tool_call_event: Option<ToolEvent>,
 }
 
 /// SSE chunk 최상위 객체.
