@@ -421,28 +421,31 @@ where
             turn_started_at = None;
             match handle.join() {
                 Ok(Ok(turn)) => {
-                    // 스트리밍 중 누적된 마지막 Assistant 줄의 콘텐츠가 최종
-                    // 결과와 다르면(예: 도구 호출로 본문이 재구성됨) generation을
-                    // 증가시켜 렌더링 캐시를 무효화한다.
-                    if let Some(last) = lines.last_mut() {
-                        if last.role == Role::Assistant
-                            && (last.text != turn.assistant_content
-                                || last.reasoning_content != turn.reasoning_content)
-                        {
-                            last.bump_generation();
-                        }
-                    }
-                    lines.push(ChatLine {
-                        role: Role::Assistant,
-                        text: turn.assistant_content.clone(),
-                        reasoning_content: turn.reasoning_content.clone(),
+                    // 스트리밍 시작 시 미리 push한 Assistant 줄을 최종 결과로
+                    // "교체"한다. 새 줄을 push 하면 스트리밍 중 누적 줄과 중복돼
+                    // 응답이 두 번 렌더되고 화면이 길어져 입력창 쪽으로 밀린다.
+                    if let Some(last) = lines.iter_mut().rev().find(|l| l.role == Role::Assistant) {
+                        last.text = turn.assistant_content.clone();
+                        last.reasoning_content = turn.reasoning_content.clone();
                         // 완료 후 reasoning 은 접힌 상태로 저장한다.
-                        reasoning_expanded: false,
-                        input_tokens: turn.input_tokens,
-                        output_tokens: turn.output_tokens,
-                        duration_ms: turn.duration_ms,
-                        ..ChatLine::default()
-                    });
+                        last.reasoning_expanded = false;
+                        last.input_tokens = turn.input_tokens;
+                        last.output_tokens = turn.output_tokens;
+                        last.duration_ms = turn.duration_ms;
+                        last.bump_generation();
+                    } else {
+                        // 스트리밍 줄이 없는 예외 경로(예: 미사용)만 push 한다.
+                        lines.push(ChatLine {
+                            role: Role::Assistant,
+                            text: turn.assistant_content.clone(),
+                            reasoning_content: turn.reasoning_content.clone(),
+                            reasoning_expanded: false,
+                            input_tokens: turn.input_tokens,
+                            output_tokens: turn.output_tokens,
+                            duration_ms: turn.duration_ms,
+                            ..ChatLine::default()
+                        });
+                    }
                     // 파일 변경 이력을 Status 줄로 명시 표시한다.
                     if !turn.files_touched.is_empty() {
                         lines.push(ChatLine {

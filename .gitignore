@@ -5,3 +5,4 @@
 /out.txt
 /mock_out.txt
 /src/new.rs
+.tmp_repro/
