@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod session;
 pub mod skills;
+pub mod slash;
 pub mod tools;
 pub mod tui;
 pub mod update;

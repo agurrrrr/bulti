@@ -293,6 +293,7 @@ mod tests {
                 vision: false,
                 thinking: false,
                 max_iterations: 200,
+                reasoning_effort: None,
             }),
             global_dir: global.to_path_buf(),
             project_root: root.to_path_buf(),

@@ -194,6 +194,7 @@ pub async fn run_segment(
             temperature: opts.temperature,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            reasoning_effort: opts.endpoint.reasoning_effort.clone(),
         };
 
         let resp = match client.chat(&opts, &req, delta_tx.clone()).await {
@@ -396,6 +397,7 @@ async fn attempt_handoff(
         temperature: opts.temperature,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        reasoning_effort: opts.endpoint.reasoning_effort.clone(),
     };
 
     let _ = estimate_messages_tokens(messages);
@@ -477,6 +479,7 @@ mod tests {
                 vision: false,
                 thinking: false,
                 max_iterations,
+                reasoning_effort: None,
             },
             temperature: None,
             system_prompt: "시스템".to_string(),

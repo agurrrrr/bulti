@@ -107,6 +107,7 @@ fn ensure_endpoint_interactive(
         vision: false,
         thinking: false,
         max_iterations: 200,
+        reasoning_effort: None,
     };
     cfg.endpoints.insert(name.clone(), ep.clone());
     // 첫 등록이면 자동 활성화.
@@ -252,8 +253,10 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         // 별도 스레드에서 실행되므로 `Send + 'static` 이 요구되고, run_tui 의 `F: Clone`
         // 바운드 때문에 클로저가 Clone 되어야 한다. move 클로저에 넣을 Arc clone 을
         // 따로 만들어 원본 변수는 이후 코드(스트림 텍스트 폴백)에서 그대로 쓰도록 한다.
-        let cfg_owned = cfg.clone();
-        let endpoint_owned = endpoint.clone();
+        // endpoint/cfg 는 TUI processor 와 command_handler 가 공유하며, `/model`·`/effort`
+        // 커맨드로 변경되므로 `Arc<Mutex<>>` 로 감싼다.
+        let endpoint_shared = Arc::new(std::sync::Mutex::new(endpoint.clone()));
+        let cfg_shared = Arc::new(std::sync::Mutex::new(cfg.clone()));
         let endpoint_name_owned = endpoint_name.clone();
         let system_prompt_owned = system_prompt.clone();
         let session_id_owned = session_id.clone();
@@ -265,9 +268,13 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         let session_tui = session_shared.clone();
         let resume_tui = resume_shared.clone();
         let interrupted_tui = interrupted_flag.clone();
+        let endpoint_tui = endpoint_shared.clone();
+        let cfg_tui = cfg_shared.clone();
         let processor = move |user_msg: String,
                               delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
               -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
+            let endpoint_guard = endpoint_tui.lock().unwrap();
+            let cfg_guard = cfg_tui.lock().unwrap();
             // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
             let effective_prompt = match resume_tui.lock().unwrap().take() {
                 Some(ctx) if !ctx.trim().is_empty() => {
@@ -295,9 +302,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     &registry_tui,
                     &system_prompt_owned,
                     effective_prompt,
-                    &endpoint_owned,
+                    &endpoint_guard,
                     &endpoint_name_owned,
-                    &cfg_owned,
+                    &cfg_guard,
                     &chain_id,
                     &session_chain_owned,
                     session_id_owned.clone(),
@@ -326,7 +333,128 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             Ok(turn_result)
         };
 
-        let tui_outcome = crate::tui::run_tui(&options, initial_lines, processor)?;
+        // TUI 슬래시 커맨드 핸들러: `/model`·`/effort`·`/exit` 등.
+        // endpoint/cfg 를 Arc<Mutex<>> 로 공유해 모델 변경을 영속화한다.
+        let endpoint_cmd = endpoint_shared.clone();
+        let cfg_cmd = cfg_shared.clone();
+        let ep_name_cmd = endpoint_name.clone();
+        let command_handler = move |line: &str| -> crate::tui::CommandResult {
+            let parsed = crate::slash::parse(line);
+            let cmd_name = parsed.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+            let args_str = parsed.as_ref().map(|p| p.args.as_str()).unwrap_or("");
+
+            match cmd_name {
+                "exit" => crate::tui::CommandResult {
+                    message: "대화를 종료합니다.".to_string(),
+                    exit: true,
+                },
+                "new" => {
+                    // 세션 재설정은 chat_loop 의 원본 변수에 반영할 수 없으므로
+                    // (TUI 는 별도 스레드), 안내 메시지만 표시한다.
+                    crate::tui::CommandResult {
+                        message: "/new 는 TUI 에서 지원하지 않습니다 (종료 후 다시 시작하세요).".to_string(),
+                        exit: false,
+                    }
+                }
+                "help" => {
+                    let mut msg = String::from("사용 가능한 커맨드:");
+                    for c in crate::slash::COMMANDS {
+                        msg.push_str(&format!("\n  {}  — {}", c.usage, c.description));
+                    }
+                    crate::tui::CommandResult {
+                        message: msg,
+                        exit: false,
+                    }
+                }
+                "resume" => {
+                    crate::tui::CommandResult {
+                        message: "/resume 은 TUI 에서 지원하지 않습니다 (종료 후 --resume 으로 재개하세요).".to_string(),
+                        exit: false,
+                    }
+                }
+                "model" => {
+                    if args_str.is_empty() {
+                        crate::tui::CommandResult {
+                            message: "사용법: /model <모델명> [low|medium|high]".to_string(),
+                            exit: false,
+                        }
+                    } else {
+                        let mut parts = args_str.split_whitespace();
+                        let model_name = parts.next().unwrap().to_string();
+                        let effort = parts.next().map(|s| s.to_lowercase());
+                        let msg;
+                        {
+                            let mut endpoint = endpoint_cmd.lock().unwrap();
+                            endpoint.model = model_name.clone();
+                            match effort {
+                                Some(e) if matches!(e.as_str(), "low" | "medium" | "high") => {
+                                    endpoint.reasoning_effort = Some(e.clone());
+                                    msg = format!(
+                                        "모델을 '{model_name}' (으)로, reasoning effort '{e}' (으)로 변경했습니다."
+                                    );
+                                }
+                                Some(e) => {
+                                    msg = format!(
+                                        "모델을 '{model_name}' (으)로 변경했습니다. (effort '{e}' 는 무시됨 — low|medium|high)"
+                                    );
+                                }
+                                None => {
+                                    msg = format!("모델을 '{model_name}' (으)로 변경했습니다.");
+                                }
+                            }
+                        }
+                        // cfg.endpoints 에 반영 + 영속화.
+                        let mut cfg_guard = cfg_cmd.lock().unwrap();
+                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name_cmd) {
+                            let endpoint = endpoint_cmd.lock().unwrap();
+                            ep.model = endpoint.model.clone();
+                            ep.reasoning_effort = endpoint.reasoning_effort.clone();
+                        }
+                        if let Err(e) = cfg_guard.save() {
+                            tracing::error!("설정 저장 실패: {e}");
+                        }
+                        crate::tui::CommandResult {
+                            message: msg,
+                            exit: false,
+                        }
+                    }
+                }
+                "effort" => {
+                    let e = args_str.trim().to_lowercase();
+                    if !matches!(e.as_str(), "low" | "medium" | "high") {
+                        crate::tui::CommandResult {
+                            message: "사용법: /effort <low|medium|high>".to_string(),
+                            exit: false,
+                        }
+                    } else {
+                        {
+                            let mut endpoint = endpoint_cmd.lock().unwrap();
+                            endpoint.reasoning_effort = Some(e.clone());
+                        }
+                        let mut cfg_guard = cfg_cmd.lock().unwrap();
+                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name_cmd) {
+                            let endpoint = endpoint_cmd.lock().unwrap();
+                            ep.reasoning_effort = endpoint.reasoning_effort.clone();
+                        }
+                        if let Err(e) = cfg_guard.save() {
+                            tracing::error!("설정 저장 실패: {e}");
+                        }
+                        crate::tui::CommandResult {
+                            message: format!("reasoning effort 를 '{e}' (으)로 설정했습니다."),
+                            exit: false,
+                        }
+                    }
+                }
+                _ => crate::tui::CommandResult {
+                    message: format!(
+                        "지원하지 않는 커맨드 '{line}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."
+                    ),
+                    exit: false,
+                },
+            }
+        };
+
+        let tui_outcome = crate::tui::run_tui(&options, initial_lines, processor, command_handler)?;
         if let Some(outcome) = tui_outcome {
             return Ok(outcome.exit_code);
         }
@@ -340,7 +468,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             &conn_guard,
             &registry,
             &system_prompt,
-            &endpoint,
+            &mut endpoint,
             &endpoint_name,
             cfg,
             &args,
@@ -380,9 +508,9 @@ async fn chat_loop(
     conn: &rusqlite::Connection,
     registry: &Arc<crate::tools::ToolRegistry>,
     system_prompt: &str,
-    endpoint: &EndpointConfig,
+    endpoint: &mut EndpointConfig,
     endpoint_name: &str,
-    cfg: &Config,
+    cfg: &mut Config,
     args: &ChatArgs,
     interrupted: Arc<AtomicBool>,
     first_prompt: Option<String>,
@@ -451,51 +579,119 @@ async fn chat_loop(
             continue;
         }
 
-        // 내부 명령 처리.
-        match prompt.as_str() {
-            "/exit" | "/quit" | "/q" => {
-                tracing::info!("종료 명령 — 대화 종료");
-                return Ok(EXIT_OK);
-            }
-            "/new" => {
-                // 새 세션 시작.
-                *session_id = make_uuid();
-                *session = session::Session::new(session_id, endpoint_name, &endpoint.model);
-                *resume_context = None;
-                session_chain = make_uuid();
-                turn = 0;
-                println!("{}", color(&format!("새 세션을 시작합니다 (세션 id: {session_id})")));
-                continue;
-            }
-            "/help" | "/?" => {
-                print_help();
-                continue;
-            }
-            "/resume" => {
-                println!(
-                    "{}",
-                    color("/resume 을 사용하려면 세션 id 가 필요합니다 — 예: /resume <id>")
-                );
-                continue;
-            }
-            _ => {
-                // `/resume <id>` 형태 처리.
-                if let Some(id) = prompt.strip_prefix("/resume ") {
-                    match session::load(id) {
-                        Ok(s) => {
-                            *session_id = id.to_string();
-                            *session = s.clone();
-                            // 이전 대화 기록을 다음 턴 프롬프트 앞에 포함.
-                            *resume_context = Some(s.conversation_context());
-                            println!("{}", color(&format!("세션 '{id}' 을(를) 재개합니다.")));
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!("세션 '{id}' 복원 실패: {e}");
-                            println!("{}", color(&format!("세션 '{id}' 을(를) 찾을 수 없습니다.")));
-                            continue;
+        // 내부 명령 처리 (src/slash::parse 로 파싱).
+        let prompt_trimmed = prompt.trim();
+        if prompt_trimmed.starts_with('/') {
+            let parsed = crate::slash::parse(prompt_trimmed);
+            let cmd_name = parsed.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+            let args_str = parsed.as_ref().map(|p| p.args.as_str()).unwrap_or("");
+
+            match cmd_name {
+                "exit" => {
+                    tracing::info!("종료 명령 — 대화 종료");
+                    return Ok(EXIT_OK);
+                }
+                "new" => {
+                    // 새 세션 시작.
+                    *session_id = make_uuid();
+                    *session = session::Session::new(session_id, endpoint_name, &endpoint.model);
+                    *resume_context = None;
+                    session_chain = make_uuid();
+                    turn = 0;
+                    println!("{}", color(&format!("새 세션을 시작합니다 (세션 id: {session_id})")));
+                    continue;
+                }
+                "help" => {
+                    print_help();
+                    continue;
+                }
+                "resume" => {
+                    if args_str.is_empty() {
+                        println!(
+                            "{}",
+                            color("/resume 을 사용하려면 세션 id 가 필요합니다 — 예: /resume <id>")
+                        );
+                    } else {
+                        match session::load(args_str) {
+                            Ok(s) => {
+                                *session_id = args_str.to_string();
+                                *session = s.clone();
+                                // 이전 대화 기록을 다음 턴 프롬프트 앞에 포함.
+                                *resume_context = Some(s.conversation_context());
+                                println!("{}", color(&format!("세션 '{args_str}' 을(를) 재개합니다.")));
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("세션 '{args_str}' 복원 실패: {e}");
+                                println!("{}", color(&format!("세션 '{args_str}' 을(를) 찾을 수 없습니다.")));
+                                continue;
+                            }
                         }
                     }
+                    continue;
+                }
+                "model" => {
+                    // `/model <name> [effort]` — 모델 전환 + 선택적 effort 설정.
+                    if args_str.is_empty() {
+                        println!("{}", color("사용법: /model <모델명> [low|medium|high]"));
+                        continue;
+                    }
+                    let mut parts = args_str.split_whitespace();
+                    let model_name = parts.next().unwrap().to_string();
+                    let effort = parts.next().map(|s| s.to_lowercase());
+                    endpoint.model = model_name.clone();
+                    if let Some(e) = effort {
+                        if matches!(e.as_str(), "low" | "medium" | "high") {
+                            endpoint.reasoning_effort = Some(e.clone());
+                            println!("{}", color(&format!("모델을 '{model_name}' (으)로, reasoning effort '{e}' (으)로 변경했습니다.")));
+                        } else {
+                            println!("{}", color(&format!("모델을 '{model_name}' (으)로 변경했습니다. (effort '{e}' 는 무시됨 — low|medium|high)")));
+                        }
+                    } else {
+                        println!("{}", color(&format!("모델을 '{model_name}' (으)로 변경했습니다.")));
+                    }
+                    // cfg.endpoints 에 반영 + 영속화.
+                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name) {
+                        ep.model = endpoint.model.clone();
+                        ep.reasoning_effort = endpoint.reasoning_effort.clone();
+                    }
+                    if let Err(e) = cfg.save() {
+                        tracing::error!("설정 저장 실패: {e}");
+                    }
+                    continue;
+                }
+                "effort" => {
+                    // `/effort <low|medium|high>` — reasoning effort 설정.
+                    let e = args_str.trim().to_lowercase();
+                    if !matches!(e.as_str(), "low" | "medium" | "high") {
+                        println!("{}", color("사용법: /effort <low|medium|high>"));
+                        continue;
+                    }
+                    endpoint.reasoning_effort = Some(e.clone());
+                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name) {
+                        ep.reasoning_effort = endpoint.reasoning_effort.clone();
+                    }
+                    if let Err(e) = cfg.save() {
+                        tracing::error!("설정 저장 실패: {e}");
+                    }
+                    println!("{}", color(&format!("reasoning effort 를 '{e}' (으)로 설정했습니다.")));
+                    continue;
+                }
+                "" => {
+                    // 미지원 슬래시 커맨드 안내.
+                    println!(
+                        "{}",
+                        color(&format!("지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."))
+                    );
+                    continue;
+                }
+                _ => {
+                    // 이론상 도달하지 않지만 안전 가드.
+                    println!(
+                        "{}",
+                        color(&format!("지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."))
+                    );
+                    continue;
                 }
             }
         }
@@ -785,6 +981,8 @@ fn print_help() {
     println!("  /exit, /quit, /q  — 대화 종료");
     println!("  /new             — 새 세션 시작");
     println!("  /resume <id>     — 세션 재개");
+    println!("  /model <name> [effort] — 모델 전환 (effort: low|medium|high)");
+    println!("  /effort <low|medium|high> — reasoning effort 설정");
     println!("  /help            — 이 도움말");
     println!("  Ctrl-D           — 대화 종료 (EOF)");
     println!("  Ctrl+C           — 중단 후 종료");

@@ -81,6 +81,9 @@ pub struct ChatRequest {
     pub temperature: Option<f64>,
     pub frequency_penalty: f64,
     pub presence_penalty: f64,
+    /// reasoning effort (thinking 모델). None 이면 요청에서 생략.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// SSE delta 내부의 툴콜 조각.
@@ -378,6 +381,7 @@ mod tests {
             vision: false,
             thinking: true,
             max_iterations: 200,
+            reasoning_effort: None,
         }
     }
 
@@ -441,6 +445,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let resp = client.chat(&opts, &req, None).await.unwrap();
@@ -506,6 +511,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let resp = client.chat(&opts, &req, None).await.unwrap();
@@ -561,6 +567,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let resp = client.chat(&opts, &req, None).await.unwrap();
@@ -595,6 +602,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let err = client.chat(&opts, &req, None).await.unwrap_err();
@@ -623,6 +631,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let err = client.chat(&opts, &req, None).await.unwrap_err();
@@ -659,6 +668,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let resp = client.chat(&opts, &req, None).await.unwrap();
@@ -692,6 +702,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.3,
             presence_penalty: 0.3,
+            reasoning_effort: None,
         };
 
         let err = client.chat(&opts, &req, None).await.unwrap_err();

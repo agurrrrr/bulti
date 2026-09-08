@@ -50,6 +50,9 @@ pub struct EndpointConfig {
     /// 세그먼트당 도구 호출 턴 상한.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// reasoning effort (low|medium|high). None 이면 미설정.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_context_tokens() -> u64 {
@@ -267,6 +270,7 @@ pub(crate) mod tests {
                     vision: true,
                     thinking: true,
                     max_iterations: 200,
+                    reasoning_effort: None,
                 },
             )]),
             mcp: std::collections::BTreeMap::from([(

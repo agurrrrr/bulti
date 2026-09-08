@@ -46,6 +46,7 @@ fn test_endpoint(url: &str) -> EndpointConfig {
         vision: false,
         thinking: false,
         max_iterations: 20,
+        reasoning_effort: None,
     }
 }
 
@@ -420,6 +421,7 @@ async fn full_pipeline_real_llm() {
         vision: false,
         thinking: false,
         max_iterations: 20,
+        reasoning_effort: None,
     };
 
     let (conn, _dir) = temp_history();

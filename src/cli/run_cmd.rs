@@ -530,6 +530,7 @@ mod tests {
             vision: false,
             thinking: false,
             max_iterations: 100,
+            reasoning_effort: None,
         };
 
         let report = build_json_report(

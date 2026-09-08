@@ -506,6 +506,7 @@ mod tests {
             vision: false,
             thinking: true,
             max_iterations: 200,
+            reasoning_effort: None,
         }
     }
 
@@ -576,6 +577,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            reasoning_effort: None,
         };
         let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
@@ -646,6 +648,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            reasoning_effort: None,
         };
         let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
@@ -713,6 +716,7 @@ mod tests {
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            reasoning_effort: None,
         };
         let resp = client.chat(&opts, &req, None).await.unwrap();
         let content = resp.content.unwrap();
