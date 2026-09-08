@@ -16,7 +16,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -308,6 +308,9 @@ where
     // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
     // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
     let mut pending_turn: PendingTurn = None;
+    // 응답 생성 중 진행 표시: 턴 시작 시각 (상태 줄의 스피너·페이즈·경과 시간
+    // 표시용). 스피너 프레임은 경과 시간에서 결정적으로 계산한다.
+    let mut turn_started_at: Option<Instant> = None;
 
     let outcome = loop {
         // 진행 중 턴의 델타를 폴링해 화면에 점진적으로 반영한다.
@@ -366,7 +369,28 @@ where
                 ])
                 .split(size);
 
-            draw_title(f, chunks[0], &options.endpoint_name, &options.model);
+            // 진행 중 턴이면 스피너 + 페이즈 + 경과 시간을 계산해 제목·상태 줄에
+            // 함께 표시한다 (스피너 프레임은 100ms 주기 결정적 계산).
+            let progress = pending_turn
+                .is_some()
+                .then(|| turn_started_at)
+                .flatten()
+                .map(|t| {
+                    let ms = t.elapsed().as_millis() as u64;
+                    (
+                        spinner((ms / 100) as usize),
+                        turn_phase(&lines),
+                        ms,
+                    )
+                });
+
+            draw_title(
+                f,
+                chunks[0],
+                &options.endpoint_name,
+                &options.model,
+                progress,
+            );
             draw_scroll(f, chunks[1], &mut lines, offset_from_bottom);
             // 고스트 텍스트: 슬래시·텍스트 드롭다운이 열리지 않은 상태에서
             // 히스토리와 접두사 일치하는 최선 후보의 나머지 부분.
@@ -388,11 +412,13 @@ where
                 total_in,
                 total_out,
                 last_assistant(&lines),
+                progress,
             );
         })?;
 
         // 진행 중 턴이 끝났는지 확인한다. 끝났으면 최종 결과를 처리한다.
         if let Some((_, handle)) = pending_turn.take() {
+            turn_started_at = None;
             match handle.join() {
                 Ok(Ok(turn)) => {
                     // 스트리밍 중 누적된 마지막 Assistant 줄의 콘텐츠가 최종
@@ -585,6 +611,7 @@ where
                     move || processor(msg, tx)
                 });
                 pending_turn = Some((rx, handle));
+                turn_started_at = Some(Instant::now());
             }
             KeyCode::Backspace => {
                 if multiline && input.as_bytes().get(cursor) == Some(&b'\n') {
@@ -760,9 +787,23 @@ where
     Ok(Some(outcome))
 }
 
-/// 제목 + 엔드포인트·모델 표시.
-fn draw_title(f: &mut ratatui::Frame, area: Rect, endpoint_name: &str, model: &str) {
-    let title = format!("불티(Bulti) 대화형 채팅 — {endpoint_name} / {model}");
+/// 제목 + 엔드포인트·모델 표시. 진행 중 턴이면 스피너·페이즈·경과 시간도
+/// 함께 보여준다.
+fn draw_title(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    endpoint_name: &str,
+    model: &str,
+    progress: Option<(&str, &str, u64)>,
+) {
+    let title = if let Some((frame, phase, elapsed_ms)) = progress {
+        format!(
+            "불티(Bulti) — {frame} {phase} ({}) — {endpoint_name} / {model}",
+            format_elapsed(elapsed_ms)
+        )
+    } else {
+        format!("불티(Bulti) 대화형 채팅 — {endpoint_name} / {model}")
+    };
     let p = Paragraph::new(title)
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .alignment(Alignment::Center);
@@ -1092,6 +1133,41 @@ fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
     lines.iter().rev().find(|l| l.role == Role::Assistant)
 }
 
+/// 스피너 프레임 문자열 (braille).
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⣣", "⣾", "⣻", "⣷", "⣯"];
+
+/// 프레임 인덱스에 해당하는 스피너 문자를 반환한다 (길이로 감돌음).
+fn spinner(frame: usize) -> &'static str {
+    SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+}
+
+/// 진행 중 턴의 현재 페이즈를 판단해 상태 표시줄에 노출한다.
+/// - 마지막 Assistant 줄에 본문이 쌓여 있으면 "응답 생성 중" (최우선)
+/// - "호출 중" 도구 줄(꼬리 ` …`)이 있으면 "도구 실행 중"
+/// - reasoning 만 쌓여 있으면 "생각 중"
+/// - 그 외(첫 토큰 도착 전) "대기 중"
+fn turn_phase(lines: &[ChatLine]) -> &'static str {
+    let tool_running = lines
+        .iter()
+        .any(|l| l.role == Role::Tool && l.text.ends_with(" …"));
+    match lines.iter().rev().find(|l| l.role == Role::Assistant) {
+        Some(l) if !l.text.trim().is_empty() => "응답 생성 중",
+        _ if tool_running => "도구 실행 중",
+        Some(l) if !l.reasoning_content.trim().is_empty() => "생각 중",
+        _ => "대기 중",
+    }
+}
+
+/// 경과 시간을 인간 가독 문자열로 포맷한다 (60s 미만: `12.3s`, 이상: `1m 05s`).
+fn format_elapsed(ms: u64) -> String {
+    let total = ms / 1000;
+    if total < 60 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}m {:02}s", total / 60, total % 60)
+    }
+}
+
 /// 도구 호출 이벤트를 Tool 줄로 반영한다.
 /// "호출 중" 이벤트(`ok == false`, 에러 없음)는 새 줄을 추가하고, 결과
 /// 이벤트는 마지막 "호출 중" 줄(꼬리 ` …`)을 제자리로 갱신해 한 도구 호출이
@@ -1324,6 +1400,7 @@ fn draw_status(
     total_in: u64,
     total_out: u64,
     last: Option<&ChatLine>,
+    progress: Option<(&str, &str, u64)>,
 ) {
     let mut status = if saved {
         format!("세션 저장됨 — {session_id}")
@@ -1331,6 +1408,18 @@ fn draw_status(
         format!("세션 id: {session_id}")
     };
     status.push_str(&format!("  세션 ↑{total_in} ↓{total_out}"));
+    // 진행 중 턴이면 스피너 + 페이즈 + 경과 시간을 표시한다.
+    if let Some((frame, phase, elapsed_ms)) = progress {
+        status.insert_str(
+            0,
+            &format!(
+                "{} {} ({})  ",
+                frame,
+                phase,
+                format_elapsed(elapsed_ms)
+            ),
+        );
+    }
     if let Some(l) = last {
         let speed = if l.duration_ms > 0 {
             l.output_tokens as f64 / (l.duration_ms as f64 / 1000.0)
@@ -1362,6 +1451,66 @@ mod tests {
         };
         assert_eq!(l.role, Role::User);
         assert_eq!(l.text, "안녕");
+    }
+
+    /// spinner: 프레임 인덱스가 프레임 수만큼 감돈다.
+    #[test]
+    fn spinner_wraps_around() {
+        assert_eq!(spinner(0), SPINNER_FRAMES[0]);
+        assert_eq!(spinner(SPINNER_FRAMES.len()), SPINNER_FRAMES[0]);
+        assert_eq!(spinner(1), SPINNER_FRAMES[1]);
+    }
+
+    /// format_elapsed: 60s 미만은 초, 이상은 분:초.
+    #[test]
+    fn format_elapsed_units() {
+        assert_eq!(format_elapsed(0), "0.0s");
+        assert_eq!(format_elapsed(1234), "1.2s");
+        assert_eq!(format_elapsed(59_999), "60.0s");
+        assert_eq!(format_elapsed(60_000), "1m 00s");
+        assert_eq!(format_elapsed(65_000), "1m 05s");
+    }
+
+    /// turn_phase: 대기 → 생각 중 → 도구 실행 중 → 응답 생성 중 순서.
+    #[test]
+    fn turn_phase_transitions() {
+        // 빈 줄: 대기 중.
+        let mut lines: Vec<ChatLine> = Vec::new();
+        assert_eq!(turn_phase(&lines), "대기 중");
+        // 빈 Assistant 줄 추가: 여전히 대기 중 (첫 토큰 도착 전).
+        lines.push(ChatLine {
+            role: Role::Assistant,
+            ..ChatLine::default()
+        });
+        assert_eq!(turn_phase(&lines), "대기 중");
+        // reasoning 만 쌓이면 생각 중.
+        lines.push(ChatLine {
+            role: Role::Assistant,
+            reasoning_content: "생각".to_string(),
+            ..ChatLine::default()
+        });
+        assert_eq!(turn_phase(&lines), "생각 중");
+        // "호출 중" 도구 줄이 있으면 도구 실행 중.
+        lines.push(ChatLine {
+            role: Role::Tool,
+            text: "read_file (foo.rs) …".to_string(),
+            ..ChatLine::default()
+        });
+        assert_eq!(turn_phase(&lines), "도구 실행 중");
+        // 본문이 쌓이면 응답 생성 중.
+        lines.push(ChatLine {
+            role: Role::Assistant,
+            text: "안녕하세요".to_string(),
+            ..ChatLine::default()
+        });
+        assert_eq!(turn_phase(&lines), "응답 생성 중");
+        // 완료된 도구 줄(꼬리 ` …` 없음)은 "도구 실행 중"으로 오인하지 않는다.
+        lines.push(ChatLine {
+            role: Role::Assistant,
+            text: "결과".to_string(),
+            ..ChatLine::default()
+        });
+        assert_eq!(turn_phase(&lines), "응답 생성 중");
     }
 
     /// step_history: ↑ 로 거슬러 올라가고 ↓ 로 최신 방향으로 내려간다.
