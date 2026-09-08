@@ -60,7 +60,127 @@ pub struct ChatLine {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u64,
+    /// 렌더링 콘텐츠 생성 번호. text/reasoning_content 가 변할 때마다 증가하고,
+    /// `render_cache` 의 무효화 키에 쓰인다 (generation tracking).
+    pub generation: u64,
+    /// 매 프레임 래핑 비용을 아끼기 위한 렌더링 캐시 (width·generation 키).
+    pub render_cache: RenderCache,
+    /// reasoning 렌더 캐시 — 본문과 독립적으로 (width, generation, expanded) 키로 관리.
+    pub reasoning_cache: RenderCache,
 }
+
+impl ChatLine {
+    /// 콘텐츠(text·reasoning)가 변했을 때 호출. generation 을 증가시켜
+    /// `render_cache` 를 무효화한다.
+    pub fn bump_generation(&mut self) {
+        self.generation += 1;
+    }
+}
+
+/// `draw_scroll` 렌더링 캐시.
+///
+/// grok-build `RenderState` 의 `(width, generation)` 키를 참고했다.
+/// - `width`/`generation` 이 이전 렌더와 같으면 `wrapped` 를 그대로 재사용해
+///   반복 렌더링이 무료(free)가 된다.
+/// - 다르면 `rendered`(접두 스타일 미적용 렌더 라인)의 공통 접두까지의
+///   `wrapped` 를 그대로 쓰고, 바뀌는 꼬리만 재래핑한다 (스트리밍
+///   `frozen_pre_wrap_count` 최적화 — 안정된 접두부는 재래핑하지 않음).
+/// - `rendered` 는 User/Status 는 원문 줄, Assistant/reasoning 은
+///   `render::render_lines` 출력(접두 스타일 제외)을 보관한다.
+#[derive(Debug, Clone, Default)]
+pub struct RenderCache {
+    width: usize,
+    generation: u64,
+    /// reasoning 펼침 상태 (expanded 접힘/펼침에 따라 렌더가 바뀌므로 키에 포함).
+    expanded: bool,
+    /// 접두/인덴트 스팬 포함·미래핑 렌더 라인.
+    rendered: Vec<Line<'static>>,
+    /// `rendered[i]` 가 만든 래핑 라인 수 (접두 재사용 경계 계산용).
+    wrapped_counts: Vec<usize>,
+    /// `rendered` 의 전체 래핑 결과.
+    wrapped: Vec<Line<'static>>,
+    /// 이 캐시에서 실제 재래핑이 일어난 횟수 (캐시 미스).
+    wrap_misses: u64,
+}
+
+impl RenderCache {
+    /// 이 캐시에서 실제 재래핑이 일어난 누적 횟수를 반환한다.
+    pub fn wrap_misses(&self) -> u64 {
+        self.wrap_misses
+    }
+    /// 같은 너비·generation·펼침 상태이면 `wrapped` 를 그대로 쓴다.
+    fn is_valid(&self, width: usize, generation: u64, expanded: bool) -> bool {
+        self.width == width && self.generation == generation && self.expanded == expanded
+    }
+
+    /// 이 줄의 렌더 라인(`rendered`, 접두/인덴트 스팬 포함·미래핑)을
+    /// `width` 열에 래핑해 `text_lines` 에 붙인다.
+    ///
+    /// - `width`·`generation`·`expanded` 가 이전 렌더와 같으면 래핑 없이
+    ///   `wrapped` 를 그대로 재사용한다 (캐시 히트 — 무료).
+    /// - 아니면 공통 접두 렌더 라인까지의 래핑 결과만 재사용하고, 바뀌는
+    ///   꼬리만 재래핑한다 (스트리밍 `frozen_pre_wrap_count` 최적화 —
+    ///   안정된 접두부는 재래핑하지 않음).
+    ///
+    /// 반환값은 캐시 히트 여부.
+    fn append_wrapped(
+        &mut self,
+        text_lines: &mut Vec<Line<'static>>,
+        rendered: &[Line<'static>],
+        width: usize,
+        generation: u64,
+        expanded: bool,
+    ) -> bool {
+        if self.is_valid(width, generation, expanded) {
+            text_lines.extend(self.wrapped.iter().cloned());
+            return true;
+        }
+        // 공통 접두 렌더 라인 수 (너비가 달라졌으면 접두 비교가 무의미).
+        let prefix_len = if self.width == width {
+            self.rendered
+                .iter()
+                .zip(rendered.iter())
+                .take_while(|(a, b)| a == b)
+                .count()
+        } else {
+            0
+        };
+        // 접두 렌더 라인 `prefix_len` 개가 소비한 래핑 라인 수 (재사용 경계).
+        let mut reuse = 0usize;
+        for &c in self.wrapped_counts.iter().take(prefix_len) {
+            reuse += c;
+        }
+        reuse = reuse.min(self.wrapped.len());
+        if reuse > 0 {
+            text_lines.extend(self.wrapped[..reuse].iter().cloned());
+        }
+        let mut counts: Vec<usize> = Vec::new();
+        for line in &rendered[prefix_len..] {
+            let start = text_lines.len();
+            for wrapped in wrap_spans(&line.spans, width) {
+                text_lines.push(Line::from(wrapped));
+            }
+            counts.push(text_lines.len() - start);
+        }
+        // 캐시 갱신 (이 줄 전체의 렌더/래핑 상태).
+        // `wrapped_counts` 는 접두 재사용 경계 계산에 쓰이므로, 이전 접두 분량과
+        // 이번 프레임 새로 래핑한 꼬리 분량을 이어 붙인 전체를 저장해야 한다.
+        let tail_len: usize = counts.iter().sum();
+        let mut new_counts = self.wrapped_counts[..prefix_len].to_vec();
+        new_counts.extend(counts);
+        self.width = width;
+        self.generation = generation;
+        self.expanded = expanded;
+        self.rendered = rendered.to_vec();
+        self.wrapped_counts = new_counts;
+        self.wrapped = text_lines[text_lines.len().saturating_sub(reuse + tail_len)..].to_vec();
+        self.wrap_misses += 1;
+        false
+    }
+}
+
+/// 실제 재래핑이 일어난 횟수 (캐시 미스)는 `RenderCache::wrap_misses()` 로
+/// 캐시별로 추적한다 (전역 카운터는 병렬 테스트에서 오염될 수 있어 제거).
 
 /// 한 턴(사용자 프롬프트 → 응답)의 결과. chat_cmd 의 `run_turn` 과
 /// TUI processor 가 공유하는 규약이다.
@@ -189,14 +309,20 @@ where
                 if let Some(text) = delta.content {
                     if let Some(last) = lines.last_mut() {
                         if last.role == Role::Assistant {
-                            last.text.push_str(&text);
+                            if !text.is_empty() {
+                                last.text.push_str(&text);
+                                last.bump_generation();
+                            }
                         }
                     }
                 }
                 if let Some(think) = delta.reasoning_content {
                     if let Some(last) = lines.last_mut() {
                         if last.role == Role::Assistant {
-                            last.reasoning_content.push_str(&think);
+                            if !think.is_empty() {
+                                last.reasoning_content.push_str(&think);
+                                last.bump_generation();
+                            }
                         }
                     }
                 }
@@ -221,7 +347,7 @@ where
                 .split(size);
 
             draw_title(f, chunks[0], &options.endpoint_name, &options.model);
-            draw_scroll(f, chunks[1], &lines, offset_from_bottom);
+            draw_scroll(f, chunks[1], &mut lines, offset_from_bottom);
             // 고스트 텍스트: 슬래시·텍스트 드롭다운이 열리지 않은 상태에서
             // 히스토리와 접두사 일치하는 최선 후보의 나머지 부분.
             let ghost = if completion_active || text_dropdown_open {
@@ -239,6 +365,17 @@ where
         if let Some((_, handle)) = pending_turn.take() {
             match handle.join() {
                 Ok(Ok(turn)) => {
+                    // 스트리밍 중 누적된 마지막 Assistant 줄의 콘텐츠가 최종
+                    // 결과와 다르면(예: 도구 호출로 본문이 재구성됨) generation을
+                    // 증가시켜 렌더링 캐시를 무효화한다.
+                    if let Some(last) = lines.last_mut() {
+                        if last.role == Role::Assistant
+                            && (last.text != turn.assistant_content
+                                || last.reasoning_content != turn.reasoning_content)
+                        {
+                            last.bump_generation();
+                        }
+                    }
                     lines.push(ChatLine {
                         role: Role::Assistant,
                         text: turn.assistant_content.clone(),
@@ -248,6 +385,7 @@ where
                         input_tokens: turn.input_tokens,
                         output_tokens: turn.output_tokens,
                         duration_ms: turn.duration_ms,
+                        ..ChatLine::default()
                     });
                 }
                 Ok(Err(e)) => {
@@ -510,7 +648,8 @@ fn wrap_spans<'a>(spans: &[Span<'a>], width: usize) -> Vec<Vec<Span<'a>>> {
     out
 }
 
-/// `width` 열에 맞춰 텍스트를 줄바꿈한다.
+/// `width` 열에 맞춰 텍스트를 줄바꿈한다. (테스트 전용)
+#[cfg(test)]
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.split('\n').map(str::to_string).collect();
@@ -541,28 +680,35 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 /// 대화 메시지 렌더링 (래핑 + 하단 고정 스크롤).
-fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_from_bottom: usize) {
+///
+/// 렌더링 캐시 (grok-build `RenderState` 참고):
+/// - 각 줄의 `render_cache` 가 (width, generation, expanded) 키로 래핑 결과를
+///   보관한다. 같은 너비·내용이면 래핑 없이 캐시에서 그대로 재사용한다.
+/// - generation 이 바뀌면(스트리밍 수신) 이전 렌더의 공통 접두까지의 래핑
+///   결과만 재사용하고 새 도착분(꼬리)만 재래핑한다 (`frozen_pre_wrap_count`).
+fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &mut [ChatLine], offset_from_bottom: usize) {
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let text_width = inner_width.max(1);
     let mut text_lines: Vec<Line> = Vec::new();
-    for l in lines {
-        let prefix = match l.role {
+    for line in lines.iter_mut() {
+        let prefix = match line.role {
             Role::User => "▶ ",
             Role::Assistant => "◀ ",
             Role::Status => "· ",
         };
-        let style = match l.role {
+        let style = match line.role {
             Role::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             Role::Assistant => Style::default().fg(Color::Cyan),
             Role::Status => Style::default().fg(Color::DarkGray),
         };
         // Assistant 응답은 마크다운 렌더링을 적용한다 (코드블록·인라인 코드·
         // 테이블·리스트·헤딩). User/Status 는 기존 평문 래핑을 유지한다.
-        if l.role == Role::Assistant {
-            let blocks = crate::render::parse(&l.text);
-            let rendered = crate::render::render_lines(&blocks);
-            // 렌더링된 각 줄에 prefix/인덴트를 붙인 뒤 스타일을 보존하며 래핑한다.
-            for (i, rline) in rendered.iter().enumerate() {
+        // 접두/인덴트 스팬을 rendered 라인에 직접 적용해, 캐시 비교·재래핑이
+        // 라인 단위에서 자기 완결적으로 되도록 한다.
+        let rendered: Vec<Line<'static>> = if line.role == Role::Assistant {
+            let blocks = crate::render::parse(&line.text);
+            let mut rendered: Vec<Line<'static>> = Vec::new();
+            for (i, rline) in crate::render::render_lines(&blocks).iter().enumerate() {
                 let mut spans: Vec<Span<'static>> = Vec::new();
                 if i == 0 {
                     spans.push(Span::styled(prefix, style));
@@ -570,44 +716,51 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &[ChatLine], offset_fr
                     spans.push(Span::raw("  ".to_string()));
                 }
                 spans.extend(rline.spans.iter().cloned());
-                for wrapped in wrap_spans(&spans, text_width) {
-                    text_lines.push(Line::from(wrapped));
-                }
+                rendered.push(Line::from(spans));
             }
+            rendered
         } else {
-            let wrapped = wrap_text(&l.text, text_width);
-            for (i, wline) in wrapped.into_iter().enumerate() {
-                let p = if i == 0 { prefix } else { "  " };
-                text_lines.push(Line::from(vec![
-                    Span::styled(p, style),
-                    Span::styled(wline, style),
-                ]));
-            }
-        }
+            // 평문: 한 원문 줄 = 한 렌더 라인 (prefix 스타일 스팬 포함).
+            line.text
+                .split('\n')
+                .map(|raw| {
+                    Line::from(vec![
+                        Span::styled(prefix, style),
+                        Span::styled(raw.to_string(), style),
+                    ])
+                })
+                .collect()
+        };
+        line.render_cache.append_wrapped(&mut text_lines, &rendered, text_width, line.generation, false);
         // 모델 생각(reasoning) — 생성 중에는 펼쳐서 실시간 표시하고, 완료 후엔
         // "🤔 생각" 한 줄로 접는다. `t` 키로 접기/펼침 토글.
-        if !l.reasoning_content.trim().is_empty() {
-            if l.reasoning_expanded {
-                let blocks = crate::render::parse(&l.reasoning_content);
-                let dim = Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
-                for rline in crate::render::render_lines(&blocks) {
-                    let spans: Vec<Span<'static>> = rline
-                        .spans
-                        .iter()
-                        .map(|s| Span::styled(s.content.clone(), dim))
-                        .collect();
-                    for wrapped in wrap_spans(&spans, text_width) {
-                        text_lines.push(Line::from(wrapped));
-                    }
-                }
+        if !line.reasoning_content.trim().is_empty() {
+            let dim = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM | Modifier::ITALIC);
+            let reasoning: Vec<Line<'static>> = if line.reasoning_expanded {
+                let blocks = crate::render::parse(&line.reasoning_content);
+                crate::render::render_lines(&blocks)
+                    .iter()
+                    .map(|rline| {
+                        Line::from(
+                            rline
+                                .spans
+                                .iter()
+                                .map(|s| Span::styled(s.content.clone(), dim))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect()
             } else {
-                text_lines.push(Line::from(vec![Span::styled(
-                    format!("🤔 생각 ({}자) — 펼치기", l.reasoning_content.chars().count()),
+                vec![Line::from(vec![Span::styled(
+                    format!("🤔 생각 ({}자) — 펼치기", line.reasoning_content.chars().count()),
                     Style::default().fg(Color::DarkGray),
-                )]));
-            }
+                )])]
+            };
+            line
+                .reasoning_cache
+                .append_wrapped(&mut text_lines, &reasoning, text_width, line.generation, line.reasoning_expanded);
         }
     }
 
@@ -941,5 +1094,128 @@ mod tests {
         update_text_completions(&mut completions, &mut idx, &mut active, "안", &sources);
         assert!(!active);
         assert!(completions.is_empty());
+    }
+
+    // ── 렌더링 캐시 (RenderCache) ──────────────────────────────────────────
+
+    /// 테스트용: 평문 rendered 라인 목록.
+    fn test_rendered(texts: &[&str]) -> Vec<Line<'static>> {
+        texts.iter().map(|t| Line::from(t.to_string())).collect()
+    }
+
+    /// (a) 같은 width·generation·expanded 로 재렌더하면 캐시 히트 —
+    /// 래핑 미스 증가 없이 출력도 동일하다.
+    #[test]
+    fn render_cache_reuse_on_same_width_generation() {
+        let rendered = test_rendered(&["안녕하세요 세계", "두 번째 줄"]);
+        let mut cache = RenderCache::default();
+
+        let mut first = Vec::new();
+        assert!(!cache.append_wrapped(&mut first, &rendered, 10, 1, false));
+        // width 10: "안녕하세요 세계" → 2줄, "두 번째 줄"(폭 10) → 1줄.
+        assert_eq!(first.len(), 3);
+        assert_eq!(cache.wrap_misses(), 1);
+
+        let mut second = Vec::new();
+        assert!(cache.append_wrapped(&mut second, &rendered, 10, 1, false));
+        assert_eq!(cache.wrap_misses(), 1, "캐시 히트에 미스 카운터는 증가하지 않아야 한다");
+        assert_eq!(first, second);
+    }
+
+    /// (b) 스트리밍: text push + bump_generation 후 렌더는 미스 1회만이고,
+    /// 출력 라인이 완전 재래핑(새 캐시) 결과와 동일하다.
+    #[test]
+    fn render_cache_streaming_prefix_frozen() {
+        let initial = test_rendered(&["안녕하세요", "다음 줄"]);
+        let mut cache = RenderCache::default();
+
+        let mut out1 = Vec::new();
+        assert!(!cache.append_wrapped(&mut out1, &initial, 10, 1, false));
+
+        // 스트리밍 수신: 첫 줄이 이어지고 generation 증가.
+        let streamed = test_rendered(&["안녕하세요 세계", "다음 줄"]);
+        let mut out2 = Vec::new();
+        assert!(!cache.append_wrapped(&mut out2, &streamed, 10, 2, false));
+        assert_eq!(cache.wrap_misses(), 2, "스트리밍 재렌더는 미스 1회만 증가해야 한다");
+
+        // 완전 재래핑(캐시 없는 상태) 결과와 동일해야 한다.
+        let mut fresh = Vec::new();
+        let mut fresh_cache = RenderCache::default();
+        assert!(!fresh_cache.append_wrapped(&mut fresh, &streamed, 10, 2, false));
+        assert_eq!(out2, fresh);
+
+        // 두 번째 스트리밍 프레임(동일 generation)은 다시 히트.
+        let mut out3 = Vec::new();
+        assert!(cache.append_wrapped(&mut out3, &streamed, 10, 2, false));
+        assert_eq!(cache.wrap_misses(), 2);
+        assert_eq!(out3, fresh);
+    }
+
+    /// (c) main / reasoning 캐시는 독립이다 — 같은 ChatLine 이 서로 다른
+    /// rendered·expanded 키로 각자 캐시를 유지한다.
+    #[test]
+    fn render_cache_main_reasoning_independent() {
+        let mut line = ChatLine {
+            role: Role::Assistant,
+            text: "본문 내용".to_string(),
+            reasoning_content: "생각 중...".to_string(),
+            reasoning_expanded: true,
+            ..ChatLine::default()
+        };
+        let main = test_rendered(&["본문 내용"]);
+        let reasoning = test_rendered(&["생각 중..."]);
+
+        // 첫 렌더: main·reasoning 각각 미스.
+        let mut out = Vec::new();
+        assert!(!line
+            .render_cache
+            .append_wrapped(&mut out, &main, 10, line.generation, false));
+        assert!(!line.reasoning_cache.append_wrapped(
+            &mut out,
+            &reasoning,
+            10,
+            line.generation,
+            line.reasoning_expanded
+        ));
+        assert_eq!(line.render_cache.wrap_misses(), 1);
+        assert_eq!(line.reasoning_cache.wrap_misses(), 1);
+
+        // 재렌더: 두 캐시 모두 히트 (미스 증가 0).
+        let mut out2 = Vec::new();
+        assert!(line
+            .render_cache
+            .append_wrapped(&mut out2, &main, 10, line.generation, false));
+        assert!(line.reasoning_cache.append_wrapped(
+            &mut out2,
+            &reasoning,
+            10,
+            line.generation,
+            line.reasoning_expanded
+        ));
+        assert_eq!(line.render_cache.wrap_misses(), 1);
+        assert_eq!(line.reasoning_cache.wrap_misses(), 1);
+        assert_eq!(out, out2);
+    }
+
+    /// (d) width 가 바뀌면 접두 재사용 없이 완전 재래핑된다.
+    #[test]
+    fn render_cache_full_rewrap_on_width_change() {
+        let rendered = test_rendered(&["안녕하세요 세계", "두 번째 줄"]);
+        let mut cache = RenderCache::default();
+
+        let mut out1 = Vec::new();
+        assert!(!cache.append_wrapped(&mut out1, &rendered, 10, 1, false));
+
+        let mut out2 = Vec::new();
+        assert!(!cache.append_wrapped(&mut out2, &rendered, 20, 1, false));
+        assert_eq!(cache.wrap_misses(), 2);
+
+        // 새 width 의 완전 재래핑 결과와 동일.
+        let mut fresh = Vec::new();
+        let mut fresh_cache = RenderCache::default();
+        assert!(!fresh_cache.append_wrapped(&mut fresh, &rendered, 20, 1, false));
+        assert_eq!(out2, fresh);
+        // 너비를 넓히면 래핑 줄 수가 줄어든다.
+        assert!(out2.len() < out1.len());
     }
 }
