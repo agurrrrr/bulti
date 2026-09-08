@@ -713,6 +713,46 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         exit: false,
                     }
                 }
+                "history" => {
+                    let sources = crate::completion::load_history_sources();
+                    let q = args_str.trim().to_lowercase();
+                    let filtered: Vec<String> = if q.is_empty() {
+                        sources
+                    } else {
+                        sources
+                            .into_iter()
+                            .filter(|s| s.to_lowercase().contains(&q))
+                            .collect()
+                    };
+                    let heading = if q.is_empty() {
+                        "프롬프트 히스토리 (최근 20개) — 빈 입력 상태에서 ↑/↓ 키로도 탐색할 수 있습니다:".to_string()
+                    } else {
+                        format!("프롬프트 히스토리 — '{}' 검색 결과 (최근 20개):", args_str.trim())
+                    };
+                    let mut msg = heading;
+                    let mut shown = 0usize;
+                    for s in filtered.iter().take(20) {
+                        // 멀티라인 프롬프트는 첫 줄로 압축해 표시한다.
+                        let single = s.lines().next().unwrap_or("").trim().to_string();
+                        if single.is_empty() {
+                            continue;
+                        }
+                        let display: String = single
+                            .chars()
+                            .take(70)
+                            .collect::<String>()
+                            + if single.chars().count() > 70 { "…" } else { "" };
+                        msg.push_str(&format!("\n  {display}"));
+                        shown += 1;
+                    }
+                    if shown == 0 {
+                        msg.push_str("\n  (히스토리가 없습니다)");
+                    }
+                    crate::tui::CommandResult {
+                        message: msg,
+                        exit: false,
+                    }
+                }
                 _ => crate::tui::CommandResult {
                     message: format!(
                         "지원하지 않는 커맨드 '{line}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요."
@@ -993,6 +1033,49 @@ async fn chat_loop(
                 }
                 "usage" => {
                     println!("{}", color(&usage_text(session, endpoint)));
+                    continue;
+                }
+                "history" => {
+                    let sources = crate::completion::load_history_sources();
+                    let q = args_str.trim().to_lowercase();
+                    let filtered: Vec<String> = if q.is_empty() {
+                        sources
+                    } else {
+                        sources
+                            .into_iter()
+                            .filter(|s| s.to_lowercase().contains(&q))
+                            .collect()
+                    };
+                    let heading = if q.is_empty() {
+                        "프롬프트 히스토리 (최근 20개):".to_string()
+                    } else {
+                        format!("프롬프트 히스토리 — '{}' 검색 결과 (최근 20개):", args_str.trim())
+                    };
+                    println!("{}", color(&heading));
+                    let mut shown = 0usize;
+                    for s in filtered.iter().take(20) {
+                        let single = s.lines().next().unwrap_or("").trim().to_string();
+                        if single.is_empty() {
+                            continue;
+                        }
+                        let display: String = single
+                            .chars()
+                            .take(70)
+                            .collect::<String>()
+                            + if single.chars().count() > 70 { "…" } else { "" };
+                        println!("{}", color(&format!("  {display}")));
+                        shown += 1;
+                    }
+                    if shown == 0 {
+                        println!("{}", color("  (히스토리가 없습니다)"));
+                    }
+                    continue;
+                }
+                "multiline" => {
+                    println!(
+                        "{}",
+                        color("/multiline 는 비 TTY 모드에서 지원하지 않습니다 (TTY 터미널에서 TUI 로 실행하세요).")
+                    );
                     continue;
                 }
                 "" => {

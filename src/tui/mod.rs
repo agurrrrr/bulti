@@ -289,11 +289,17 @@ where
 
     // 일반 텍스트(히스토리·세션 기반) 자동완성 상태.
     // 히스토리 후보를 미리 로드해 두고, 입력 중 fuzzy 매칭으로 후보를 뽑는다.
-    let history_sources: Vec<String> = crate::completion::load_history_sources();
+    let mut history_sources: Vec<String> = crate::completion::load_history_sources();
     // 일반 텍스트 자동완성 후보 (슬래시 커맨드와 별도로 관리).
     let mut text_completions: Vec<crate::completion::CompletionItem> = Vec::new();
     let mut text_completion_idx: usize = 0;
     let mut text_completion_active = false;
+
+    // 프롬프트 히스토리 탐색 상태 (↑/↓ 키). 자동완성과 공용으로
+    // `history_sources` 를 재사용한다 (최근이 앞에 정렬됨).
+    let mut history_idx: Option<usize> = None;
+    // 멀티라인 입력 모드: 켜져 있으면 Shift+Enter 로 줄바꿈, Enter 로 전송.
+    let mut multiline = false;
 
     // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
     // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
@@ -336,12 +342,18 @@ where
             let size = f.area();
             // 슬래시 드롭다운이 열려 있으면 텍스트 드롭다운은 겹치지 않게 닫는다.
             let text_dropdown_open = !completion_active && !text_completions.is_empty();
+            // 멀티라인 모드면 입력창을 키운다 (최소 5줄).
+            let input_constraint = if multiline {
+                Constraint::Min(5)
+            } else {
+                Constraint::Length(3)
+            };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // 제목
                     Constraint::Min(3),    // 대화 리스트
-                    Constraint::Length(3), // 입력창
+                    input_constraint,      // 입력창
                     Constraint::Length(1), // 상태 표시
                 ])
                 .split(size);
@@ -350,12 +362,12 @@ where
             draw_scroll(f, chunks[1], &mut lines, offset_from_bottom);
             // 고스트 텍스트: 슬래시·텍스트 드롭다운이 열리지 않은 상태에서
             // 히스토리와 접두사 일치하는 최선 후보의 나머지 부분.
-            let ghost = if completion_active || text_dropdown_open {
+            let ghost = if completion_active || text_dropdown_open || multiline {
                 String::new()
             } else {
                 crate::completion::best_ghost(&input, &history_sources).unwrap_or_default()
             };
-            draw_input(f, chunks[2], &input, &ghost);
+            draw_input(f, chunks[2], &input, &ghost, multiline);
             draw_completions(f, chunks[2], &completions, completion_idx);
             draw_text_completions(f, chunks[2], &text_completions, text_completion_idx);
             let total_in: u64 = lines.iter().map(|l| l.input_tokens).sum();
@@ -475,8 +487,33 @@ where
                 if pending_turn.is_some() {
                     continue;
                 }
+                // 멀티라인 모드: Shift+Enter (또는 Alt+Enter) 는 줄바꿈.
+                if multiline
+                    && (modifiers.contains(KeyModifiers::SHIFT)
+                        || modifiers.contains(KeyModifiers::ALT))
+                {
+                    input.push('\n');
+                    continue;
+                }
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
+                    continue;
+                }
+                // `/multiline` — 멀티라인 입력 모드 토글 (command_handler 미경유).
+                if trimmed == "/multiline" {
+                    multiline = !multiline;
+                    let msg = if multiline {
+                        "멀티라인 입력 모드 켜짐 — Shift+Enter 줄바꿈, Enter 전송".to_string()
+                    } else {
+                        "멀티라인 입력 모드 꺼짐".to_string()
+                    };
+                    lines.push(ChatLine {
+                        role: Role::Status,
+                        text: msg,
+                        ..ChatLine::default()
+                    });
+                    offset_from_bottom = 0;
+                    input.clear();
                     continue;
                 }
                 input.clear();
@@ -503,6 +540,9 @@ where
                     text: trimmed.clone(),
                     ..ChatLine::default()
                 });
+                // 보낸 프롬프트를 히스트리에 기록한다 (최근이 앞에, 슬래시 커맨드는 제외됨).
+                history_idx = None;
+                history_sources.insert(0, trimmed.clone());
                 // 응답 생성 중 상태: 빈 Assistant 메시지를 미리 추가해, 도착하는
                 // 델타가 이 메시지에 점진적으로 누적되게 한다.
                 lines.push(ChatLine {
@@ -527,9 +567,17 @@ where
                 pending_turn = Some((rx, handle));
             }
             KeyCode::Backspace => {
-                input.pop();
-                update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
-                update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
+                if multiline && input.ends_with('\n') {
+                    // 멀티라인: 줄바꿈을 한 번에 지운다 (마지막 비어 있는 줄 삭제).
+                    input.pop();
+                    input.pop();
+                } else {
+                    input.pop();
+                }
+                if !multiline {
+                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
+                }
             }
             KeyCode::Tab => {
                 // Tab: 자동완성 선택 항목 순환 (슬래시 드롭다운이 열려 있으면
@@ -571,8 +619,10 @@ where
                     continue;
                 }
                 input.push(c);
-                update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
-                update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
+                if !multiline {
+                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_text_completions(&mut text_completions, &mut text_completion_idx, &mut text_completion_active, &input, &history_sources);
+                }
             }
             KeyCode::PageUp => {
                 offset_from_bottom = offset_from_bottom.saturating_add(10);
@@ -585,6 +635,12 @@ where
                     completion_idx = completion_idx.saturating_sub(1);
                 } else if text_completion_active && !text_completions.is_empty() {
                     text_completion_idx = text_completion_idx.saturating_sub(1);
+                } else if input.trim().is_empty() && !history_sources.is_empty() {
+                    // 히스토리 탐색: 빈 입력에서 ↑ 로 이전 프롬프트를 거슬러 올라간다.
+                    history_idx = step_history(&history_sources, history_idx, true);
+                    input = history_idx
+                        .map(|i| history_sources[i].clone())
+                        .unwrap_or_default();
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
                 }
@@ -594,6 +650,12 @@ where
                     completion_idx = (completion_idx + 1) % completions.len();
                 } else if text_completion_active && !text_completions.is_empty() {
                     text_completion_idx = (text_completion_idx + 1) % text_completions.len();
+                } else if input.trim().is_empty() && history_idx.is_some() {
+                    // 히스토리 탐색 종료: ↓ 로 최신 방향으로 내려가다 끝나면 입력창 비움.
+                    history_idx = step_history(&history_sources, history_idx, false);
+                    input = history_idx
+                        .map(|i| history_sources[i].clone())
+                        .unwrap_or_default();
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
@@ -789,6 +851,22 @@ fn scroll_from_bottom(total_lines: usize, height: u16, offset_from_bottom: usize
     max_scroll.saturating_sub(offset_from_bottom)
 }
 
+/// 히스토리 탐색: ↑(up=true) 또는 ↓(up=false) 로 이동한 다음 인덱스를 반환.
+/// - `up`: `None` → 마지막 항목, `Some(i)` → `i-1` (처음 이상으로 못 감).
+/// - `down`: `Some(i)` → `i-1` (0 이하면 `None`, 탐색 종료·입력창 비움).
+/// `history` 가 비어 있으면 `None`.
+pub fn step_history(history: &[String], history_idx: Option<usize>, up: bool) -> Option<usize> {
+    if history.is_empty() {
+        return None;
+    }
+    match (history_idx, up) {
+        (None, true) => Some(history.len() - 1),
+        (Some(i), true) => Some(i.saturating_sub(1)),
+        (Some(i), false) => i.checked_sub(1),
+        (None, false) => None,
+    }
+}
+
 /// 마지막 Assistant 응답을 찾아 상태 표시줄에 토큰/속도를 보여준다.
 fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
     lines.iter().rev().find(|l| l.role == Role::Assistant)
@@ -796,25 +874,39 @@ fn last_assistant(lines: &[ChatLine]) -> Option<&ChatLine> {
 
 /// 입력창 렌더링. `ghost` 가 비어 있지 않으면 커서(입력 문자열) 뒤에
 /// dim+italic 고스트 텍스트를 연결해 표시한다.
-fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, ghost: &str) {
-    let spans = if ghost.is_empty() {
-        vec![Span::raw(input.to_string())]
+/// `multiline` 이면 입력을 줄 단위로 나눠 여러 줄로 렌더한다 (고스트 스킵).
+fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, ghost: &str, multiline: bool) {
+    let title = if multiline {
+        "입력 (멀티라인 — Shift+Enter 줄바꿈 · Enter 전송 · /multiline 꺼짐)"
     } else {
-        vec![
-            Span::raw(input.to_string()),
-            Span::styled(
-                ghost.to_string(),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM | Modifier::ITALIC),
-            ),
-        ]
+        "입력 (Enter 전송 · Tab 자동완성 · Ctrl+S 저장 · Ctrl+Q 종료)"
     };
-    let p = Paragraph::new(Line::from(spans))
+    let lines: Vec<Line> = if multiline {
+        input
+            .split('\n')
+            .map(|l| Line::from(Span::raw(l.to_string())))
+            .collect()
+    } else {
+        let spans = if ghost.is_empty() {
+            vec![Span::raw(input.to_string())]
+        } else {
+            vec![
+                Span::raw(input.to_string()),
+                Span::styled(
+                    ghost.to_string(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM | Modifier::ITALIC),
+                ),
+            ]
+        };
+        vec![Line::from(spans)]
+    };
+    let p = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("입력 (Enter 전송 · Tab 자동완성 · Ctrl+S 저장 · Ctrl+Q 종료)"),
+                .title(title),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
@@ -990,6 +1082,25 @@ mod tests {
         };
         assert_eq!(l.role, Role::User);
         assert_eq!(l.text, "안녕");
+    }
+
+    /// step_history: ↑ 로 거슬러 올라가고 ↓ 로 최신 방향으로 내려간다.
+    #[test]
+    fn step_history_navigation() {
+        let h: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        // 빈 상태에서 ↑ → 가장 오래된(마지막) 항목.
+        assert_eq!(step_history(&h, None, true), Some(2));
+        assert_eq!(step_history(&h, Some(2), true), Some(1));
+        assert_eq!(step_history(&h, Some(1), true), Some(0));
+        // 처음 이상으로 못 간다.
+        assert_eq!(step_history(&h, Some(0), true), Some(0));
+        // ↓ 로 최신 방향으로.
+        assert_eq!(step_history(&h, Some(2), false), Some(1));
+        assert_eq!(step_history(&h, Some(1), false), Some(0));
+        // 최신(0)에서 ↓ → 탐색 종료.
+        assert_eq!(step_history(&h, Some(0), false), None);
+        // 비어 있으면 항상 None.
+        assert_eq!(step_history(&[], None, true), None);
     }
 
     /// TTY 가 아니면 run_tui 는 None 을 반환한다 (스트림 텍스트 폴백).
