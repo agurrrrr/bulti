@@ -21,6 +21,8 @@ pub struct GuardContext {
     pub recent_signatures: Vec<String>,
     /// pause-summary nudge 횟수.
     pub pause_nudges: u32,
+    /// 연속 reasoning-only 턴 수 (content·tool_calls 모두 비어 있는 턴).
+    pub reasoning_only_turns: u32,
     /// 코드 수정 도구 호출 여부 (build gate용).
     pub code_modified: bool,
     /// bash 도구 호출 여부 (build gate용).
@@ -335,5 +337,13 @@ mod tests {
         let sig = tool_signature("bash", &args);
         assert!(sig.starts_with("bash:"));
         assert!(sig.chars().count() <= 85);
+    }
+
+    // ── GuardContext 기본값 ──
+
+    #[test]
+    fn guard_context_defaults_reasoning_only_turns_zero() {
+        let ctx = GuardContext::default();
+        assert_eq!(ctx.reasoning_only_turns, 0);
     }
 }

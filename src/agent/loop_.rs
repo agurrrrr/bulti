@@ -257,21 +257,56 @@ pub async fn run_segment(
         }
 
         // 가드 적용.
-        if visible.trim().is_empty() {
+        // reasoning-only 턴(content 비어 reasoning만 있음)은 empty_turns 카운트하지 않는다.
+        let is_reasoning_only = is_reasoning_only_turn(&resp);
+        if visible.trim().is_empty() && !is_reasoning_only {
             guard.empty_turns += 1;
         } else {
             guard.empty_turns = 0;
         }
-        let outcomes = [
-            check_empty_loop(&guard),
-            check_stream_repetition(&visible),
-            check_stuck_signature(&guard),
-            check_fffd_degenerate(&visible),
-            check_build_gate(&guard, &visible),
-            check_pause_summary(&guard, &visible),
-        ];
+        // pause-summary 가드는 도구 호출 없는 "완료 후보" 턴에만 적용한다.
+        // 도구 호출 턴의 중간 발화("다음 세션에 이어서" 등)가 nudge 로 잡히면
+        // tool_calls 가 미실행 상태로 세그먼트가 끝나 버린다.
+        let outcomes: Vec<GuardOutcome> = if resp.tool_calls.is_empty() {
+            vec![
+                check_empty_loop(&guard),
+                check_stream_repetition(&visible),
+                check_stuck_signature(&guard),
+                check_fffd_degenerate(&visible),
+                check_build_gate(&guard, &visible),
+                check_pause_summary(&guard, &visible),
+            ]
+        } else {
+            vec![
+                check_empty_loop(&guard),
+                check_stream_repetition(&visible),
+                check_stuck_signature(&guard),
+                check_fffd_degenerate(&visible),
+                check_build_gate(&guard, &visible),
+            ]
+        };
         for outcome in outcomes {
             if let GuardOutcome::Trigger(reason) = outcome {
+                // nudge 류: 세그먼트 종료 대신 넛지 user 메시지 push 후 다음 턴으로.
+                if reason.starts_with("nudge:") {
+                    guard.pause_nudges += 1;
+                    tracing::warn!(
+                        "가드 nudge: {reason} (pause_nudges={})",
+                        guard.pause_nudges
+                    );
+                    messages.push(Message {
+                        role: "user".to_string(),
+                        content: Some(
+                            "이전 응답을 중단으로 처리하지 마세요. 남은 작업을 계속 진행하거나 \
+                             사용자에게 바로 답하세요."
+                                .to_string(),
+                        ),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    break;
+                }
                 tracing::warn!("가드 발동: {reason}");
                 return SegmentResult {
                     status: SegmentStatus::Incomplete,
@@ -371,6 +406,48 @@ pub async fn run_segment(
             continue;
         }
 
+        // reasoning-only 턴(content 비어 reasoning만 있음)은 완료 후보가 아니다.
+        // 모델의 생각만 흘러나온 턴이라 넛지로 실제 답을 유도한다.
+        // 3턴 연속이면 그 자체로 퇴행이므로 incomplete.
+        if is_reasoning_only {
+            guard.reasoning_only_turns += 1;
+            if guard.reasoning_only_turns >= 3 {
+                tracing::warn!(
+                    "reasoning-only 턴 {}연속 — incomplete",
+                    guard.reasoning_only_turns
+                );
+                return SegmentResult {
+                    status: SegmentStatus::Incomplete,
+                    content: final_content,
+                    reasoning_content: final_reasoning.clone(),
+                    input_tokens,
+                    output_tokens,
+                    files_touched: registry.files_touched(),
+                    depth,
+                    handoff: None,
+                    handoff_response: None,
+                };
+            }
+            tracing::warn!(
+                "reasoning-only 턴 (reasoning_only_turns={}) — 넛지",
+                guard.reasoning_only_turns
+            );
+            messages.push(Message {
+                role: "user".to_string(),
+                content: Some(
+                    "이전 응답은 생각 과정뿐이었다. \
+                     도구가 필요 없으면 사용자에게 바로 답하세요."
+                        .to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+            continue;
+        }
+
+        guard.reasoning_only_turns = 0;
+
         return SegmentResult {
             status: SegmentStatus::Completed,
             content: final_content,
@@ -455,6 +532,20 @@ async fn attempt_handoff(
     } else {
         (HandoffDecision::Handoff, Some(parsed))
     }
+}
+
+/// reasoning-only 턴 판단.
+///
+/// content 비어(또는 None) + reasoning_content 비어 아님 + tool_calls 없음.
+/// 이런 턴은 "완료 후보"가 아니라 모델의 생각만 흘러나온 턴이므로
+/// 넛지로 다음 턴을 유도해야 한다 (shepherd #44 run 교훈).
+fn is_reasoning_only_turn(resp: &crate::llm::ChatResponse) -> bool {
+    let content_empty = resp.content.as_deref().map_or(true, |c| c.trim().is_empty());
+    let reasoning_nonempty = resp
+        .reasoning_content
+        .as_deref()
+        .map_or(false, |r| !r.trim().is_empty());
+    content_empty && reasoning_nonempty && resp.tool_calls.is_empty()
 }
 
 /// 사용자에게 보여줄 텍스트. content 가 비면 reasoning_content 로 대체한다.
@@ -663,15 +754,16 @@ mod tests {
         assert!(result.handoff_response.is_none());
     }
 
-    /// content 가 비고 reasoning_content 만 있으면 그걸 완료 응답으로 쓴다.
+    /// content 가 비고 reasoning_content 만 있는 턴은 완료 후보가 아니다.
+    /// 3턴 연속 reasoning-only 이면 incomplete 로 처리한다 (shepherd #44 run 교훈).
     #[tokio::test]
-    async fn reasoning_only_completes_as_reply() {
+    async fn reasoning_only_turns_nudged_then_incomplete() {
         let server = MockServer::start().await;
         let body = format!(
             "data: {}\n\n",
             serde_json::json!({
                 "choices": [{
-                    "delta": {"reasoning_content": "안녕하세요, 도와드리겠습니다."},
+                    "delta": {"reasoning_content": "먼저 문제를 분석해야겠어요."},
                     "finish_reason": "stop"
                 }]
             })
@@ -679,15 +771,101 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body.as_str(), "text/event-stream"))
-            .expect(1)
+            .expect(3)
             .mount(&server)
             .await;
 
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
         let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0, None).await;
+        // 1·2턴: 넛지 후 재요청, 3턴째 reasoning-only → incomplete
+        assert_eq!(result.status, SegmentStatus::Incomplete);
+    }
+
+    /// content 가 비고 reasoning_content 만 있으면 넛지 후 재요청해 실제 답으로 완료한다.
+    #[tokio::test]
+    async fn reasoning_only_completes_as_reply() {
+        let server = MockServer::start().await;
+        let reasoning_body = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {"reasoning_content": "사용자의 인사에 어떻게 답할지 생각 중"},
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+        let reply_body = sse_chunk("안녕하세요, 도와드리겠습니다.");
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(200)
+                        .set_body_raw(reasoning_body.as_str(), "text/event-stream")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_raw(reply_body.as_str(), "text/event-stream")
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = LlmClient::new();
+        let registry = ToolRegistry::new(false);
+        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0, None).await;
+        // 1턴 reasoning-only → 넛지, 2턴 정상 텍스트 → Completed
         assert_eq!(result.status, SegmentStatus::Completed);
         assert!(result.content.contains("안녕하세요"));
+    }
+
+    // ── is_reasoning_only_turn 단위 테스트 ──
+
+    fn resp(
+        content: Option<&str>,
+        reasoning: Option<&str>,
+        tool_calls: Vec<crate::llm::ToolCall>,
+    ) -> crate::llm::ChatResponse {
+        crate::llm::ChatResponse {
+            content: content.map(String::from),
+            reasoning_content: reasoning.map(String::from),
+            tool_calls,
+            finish_reason: "stop".to_string(),
+            usage: Default::default(),
+            incomplete: false,
+        }
+    }
+
+    #[test]
+    fn is_reasoning_only_turn_positive() {
+        // content 비어 + reasoning 있음 + tool_calls 없음 → true
+        assert!(is_reasoning_only_turn(&resp(None, Some("고민 중"), vec![])));
+    }
+
+    #[test]
+    fn is_reasoning_only_turn_negative_has_content() {
+        // content 있으면 reasoning만 아니므로 false
+        assert!(!is_reasoning_only_turn(&resp(Some("답변"), Some("고민 중"), vec![])));
+    }
+
+    #[test]
+    fn is_reasoning_only_turn_negative_no_reasoning() {
+        // reasoning도 없으면 빈 턴일 뿐 reasoning-only 아님
+        assert!(!is_reasoning_only_turn(&resp(None, None, vec![])));
+    }
+
+    #[test]
+    fn is_reasoning_only_turn_negative_has_tool_calls() {
+        // tool_calls 있으면 도구 호출 턴이므로 false
+        let tc = crate::llm::ToolCall {
+            id: Some("1".to_string()),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+        assert!(!is_reasoning_only_turn(&resp(None, Some("고민 중"), vec![tc])));
     }
 
     /// 컨텍스트가 이미 임계를 넘으면 본 요청 전에 핸드오프한다.
