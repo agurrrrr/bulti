@@ -1345,8 +1345,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize, mu
     f.render_widget(p, area);
 }
 
-/// 자동완성 드롭다운에 한 번에 보여 줄 최대 항목 수.
-const COMPLETION_MAX_VISIBLE: usize = 6;
+/// 자동완성 드롭다운에 한 번에 보여 줄 항목 수.
+///
+/// 드롭다운 상자는 제목 1줄 + 항목 `N`줄 + 위아래 테두리 2줄로 그려진다.
+/// 5번째 항목에서 창이 스크롤되도록(선택 항목이 항상 보이도록) `N = 4` 로 둔다.
+/// 상자 높이는 항목 수에 테두리·제목을 더한 값을 써야 하며, 그렇지 않으면
+/// 아래쪽 항목이 테두리에 가려 보이지 않는다.
+const COMPLETION_MAX_VISIBLE: usize = 4;
 
 /// 선택 인덱스가 항상 창 안에 오도록 보여 줄 항목 범위 `(start, end)` 를
 /// 계산한다. 고정으로 앞쪽 항목만 그리면 뒤에 추가된 커맨드가 선택해도
@@ -1376,7 +1381,9 @@ fn draw_completions(
     let total = completions.len();
     let (start, end) = completion_window(total, idx, COMPLETION_MAX_VISIBLE);
     let items = &completions[start..end];
-    let height = items.len() as u16 + 1; // 제목 1줄 + 항목
+    // 제목 1줄 + 항목 + 위아래 테두리 2줄. 테두리 몫을 빼먹으면 마지막
+    // 항목이 잘려 선택 표시가 보이지 않는다.
+    let height = items.len() as u16 + 3;
     let y = input_area.y.saturating_sub(height);
     if y == 0 || y > input_area.y {
         return;
@@ -1768,6 +1775,45 @@ mod tests {
         assert!(active);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].insert, "/model qwen3-32b");
+    }
+
+    /// 드롭다운 상자의 테두리·제목이 항목 줄을 잡아먹지 않아야 한다.
+    /// 선택 항목이 창 밖으로 밀려 보이지 않던 회귀를 막는다.
+    #[test]
+    fn draw_completions_keeps_selection_visible() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let comps: Vec<crate::slash::Suggestion> = (0..16)
+            .map(|i| crate::slash::Suggestion {
+                display: format!("/cmd{i:02}"),
+                insert: format!("/cmd{i:02}"),
+                description: "desc",
+            })
+            .collect();
+        let input_area = Rect::new(0, 20, 80, 3);
+        for idx in 0..comps.len() {
+            terminal
+                .draw(|f| draw_completions(f, input_area, &comps, idx))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let text: String = (0..24u16)
+                .map(|y| {
+                    (0..80u16)
+                        .map(|x| {
+                            buf.cell((x, y))
+                                .map(|c| c.symbol().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains(&format!("▶ /cmd{idx:02}")),
+                "선택 항목 /cmd{idx:02} 가 보이지 않는다:\n{text}"
+            );
+        }
     }
 
     /// 창은 선택을 따라 움직여 뒤쪽 항목도 보이게 한다.
