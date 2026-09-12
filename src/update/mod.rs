@@ -408,11 +408,19 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 빌드 타깃 트리플 (예: `x86_64-unknown-linux-gnu`).
+/// 빌드 타깃 트리플 (예: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`).
+///
+/// `target_env` 를 cfg 로 판별해 ABI 접미사를 결정한다. `std::env::consts` 에는
+/// ABI(gnu/musl) 정보가 없으므로 musl 빌드(Alpine)에서도 올바른 asset 을
+/// 고르려면 이 값이 필요하다.
 fn target_triple() -> String {
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
-    let env = "gnu";
+    let env = if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
+    };
     format!("{arch}-{os}-{env}")
 }
 
@@ -511,6 +519,20 @@ mod tests {
     #[test]
     fn target_triple_is_nonempty() {
         assert!(!target_triple().is_empty());
+    }
+
+    #[test]
+    fn target_triple_env_matches_cfg() {
+        let triple = target_triple();
+        let expected_env = if cfg!(target_env = "musl") {
+            "musl"
+        } else {
+            "gnu"
+        };
+        assert!(
+            triple.ends_with(expected_env),
+            "triple={triple} env={expected_env}"
+        );
     }
 
     #[test]
