@@ -470,7 +470,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         // 커맨드로 변경되므로 `Arc<Mutex<>>` 로 감싼다.
         let endpoint_shared = Arc::new(std::sync::Mutex::new(endpoint.clone()));
         let cfg_shared = Arc::new(std::sync::Mutex::new(cfg.clone()));
-        let endpoint_name_owned = endpoint_name.clone();
+        // 활성 엔드포인트 이름은 `/endpoint use` 로 바뀔 수 있으므로 공유한다.
+        let endpoint_name_shared = Arc::new(std::sync::Mutex::new(endpoint_name.clone()));
+        let endpoint_name_tui = endpoint_name_shared.clone();
         let system_prompt_owned = system_prompt.clone();
         let session_id_owned = session_id.clone();
         let session_chain_owned = session_chain.clone();
@@ -492,6 +494,9 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             move |user_msg: String,
                   delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
                   -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
+                // `/endpoint use` 로 이름이 바뀔 수 있다. 이름은 짧게 lock 하고
+                // endpoint lock 을 잡아 순환 대기를 피한다.
+                let endpoint_name_owned = endpoint_name_tui.lock().unwrap().clone();
                 let endpoint_guard = endpoint_tui.lock().unwrap();
                 let cfg_guard = cfg_tui.lock().unwrap();
                 // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
@@ -563,7 +568,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         // endpoint/cfg 를 Arc<Mutex<>> 로 공유해 모델 변경을 영속화한다.
         let endpoint_cmd = endpoint_shared.clone();
         let cfg_cmd = cfg_shared.clone();
-        let ep_name_cmd = endpoint_name.clone();
+        let ep_name_cmd = endpoint_name_shared.clone();
         let command_handler = move |line: &str| -> crate::tui::CommandResult {
             let parsed = crate::slash::parse(line);
             let cmd_name = parsed.as_ref().map(|p| p.name.as_str()).unwrap_or("");
@@ -668,7 +673,8 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         }
                         // cfg.endpoints 에 반영 + 영속화.
                         let mut cfg_guard = cfg_cmd.lock().unwrap();
-                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name_cmd) {
+                        let ep_name = ep_name_cmd.lock().unwrap().clone();
+                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name) {
                             let endpoint = endpoint_cmd.lock().unwrap();
                             ep.model = endpoint.model.clone();
                             ep.reasoning_effort = endpoint.reasoning_effort.clone();
@@ -699,7 +705,8 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             endpoint.reasoning_effort = Some(e.clone());
                         }
                         let mut cfg_guard = cfg_cmd.lock().unwrap();
-                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name_cmd) {
+                        let ep_name = ep_name_cmd.lock().unwrap().clone();
+                        if let Some(ep) = cfg_guard.endpoints.get_mut(&ep_name) {
                             let endpoint = endpoint_cmd.lock().unwrap();
                             ep.reasoning_effort = endpoint.reasoning_effort.clone();
                         }
@@ -719,16 +726,28 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     }
                 }
                 "endpoint" => {
-                    let cfg_guard = cfg_cmd.lock().unwrap();
+                    let mut cfg_guard = cfg_cmd.lock().unwrap();
+                    let current = ep_name_cmd.lock().unwrap().clone();
+                    let (message, activated) =
+                        endpoint_admin(&mut cfg_guard, &current, args_str, true);
+                    // 설정 변경을 세션 런타임(endpoint_shared)에 반영한다.
+                    let active_name = activated.clone().unwrap_or_else(|| current.clone());
+                    if let Some(ep) = cfg_guard.endpoints.get(&active_name).cloned() {
+                        drop(cfg_guard);
+                        *endpoint_cmd.lock().unwrap() = ep;
+                        if activated.is_some() {
+                            *ep_name_cmd.lock().unwrap() = active_name;
+                        }
+                    }
                     crate::tui::CommandResult {
-                        message: endpoint_text(&cfg_guard, &ep_name_cmd, args_str),
+                        message,
                         exit: false,
                     }
                 }
                 "mcp" => {
-                    let cfg_guard = cfg_cmd.lock().unwrap();
+                    let mut cfg_guard = cfg_cmd.lock().unwrap();
                     crate::tui::CommandResult {
-                        message: mcp_text(&cfg_guard, args_str),
+                        message: mcp_admin(&mut cfg_guard, args_str, true),
                         exit: false,
                     }
                 }
@@ -930,7 +949,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
             &registry,
             &system_prompt,
             &mut endpoint,
-            &endpoint_name,
+            &mut endpoint_name,
             cfg,
             &args,
             interrupted_flag,
@@ -970,7 +989,7 @@ async fn chat_loop(
     registry: &Arc<crate::tools::ToolRegistry>,
     system_prompt: &str,
     endpoint: &mut EndpointConfig,
-    endpoint_name: &str,
+    endpoint_name: &mut String,
     cfg: &mut Config,
     args: &ChatArgs,
     interrupted: Arc<AtomicBool>,
@@ -1065,7 +1084,8 @@ async fn chat_loop(
                 "new" => {
                     // 새 세션 시작.
                     *session_id = make_uuid();
-                    *session = session::Session::new(session_id, endpoint_name, &endpoint.model);
+                    *session =
+                        session::Session::new(session_id, endpoint_name.as_str(), &endpoint.model);
                     *resume_context = None;
                     session_chain = make_uuid();
                     turn = 0;
@@ -1167,7 +1187,7 @@ async fn chat_loop(
                         );
                     }
                     // cfg.endpoints 에 반영 + 영속화.
-                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name) {
+                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name.as_str()) {
                         ep.model = endpoint.model.clone();
                         ep.reasoning_effort = endpoint.reasoning_effort.clone();
                     }
@@ -1190,7 +1210,7 @@ async fn chat_loop(
                         continue;
                     }
                     endpoint.reasoning_effort = Some(e.clone());
-                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name) {
+                    if let Some(ep) = cfg.endpoints.get_mut(endpoint_name.as_str()) {
                         ep.reasoning_effort = endpoint.reasoning_effort.clone();
                     }
                     if let Err(e) = cfg.save() {
@@ -1209,11 +1229,20 @@ async fn chat_loop(
                     continue;
                 }
                 "endpoint" => {
-                    println!("{}", color(&endpoint_text(cfg, endpoint_name, args_str)));
+                    let (msg, activated) =
+                        endpoint_admin(cfg, endpoint_name.as_str(), args_str, true);
+                    if let Some(new_name) = activated {
+                        *endpoint_name = new_name;
+                    }
+                    // 설정 변경(활성 전환 포함)을 세션 런타임에 반영한다.
+                    if let Some(ep) = cfg.endpoints.get(endpoint_name.as_str()) {
+                        *endpoint = ep.clone();
+                    }
+                    println!("{}", color(&msg));
                     continue;
                 }
                 "mcp" => {
-                    println!("{}", color(&mcp_text(cfg, args_str)));
+                    println!("{}", color(&mcp_admin(cfg, args_str, true)));
                     continue;
                 }
                 "session-info" => {
@@ -1859,6 +1888,392 @@ fn endpoint_list_text(cfg: &Config, active_name: &str) -> String {
     out
 }
 
+/// `key=value` 토큰들을 (키, 값) 목록으로 파싱한다. `=` 없는 토큰은 무시한다.
+fn parse_kv(tokens: &[&str]) -> Vec<(String, String)> {
+    tokens
+        .iter()
+        .filter_map(|t| {
+            t.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// kv 목록에서 `keys` 중 처음 일치하는 값을 찾는다.
+fn kv_get(kv: &[(String, String)], keys: &[&str]) -> Option<String> {
+    kv.iter()
+        .find(|(k, _)| keys.contains(&k.as_str()))
+        .map(|(_, v)| v.clone())
+}
+
+/// `on|true|yes|1`/`off|false|no|0` 을 bool 로 본다. 그 외는 `default`.
+fn parse_bool(value: &str, default: bool) -> bool {
+    match value.trim().to_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => true,
+        "off" | "false" | "no" | "0" => false,
+        _ => default,
+    }
+}
+
+/// `K=V,K2=V2` 형식의 env 문자열을 맵으로 파싱한다.
+fn parse_env_map(spec: Option<&str>) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    if let Some(spec) = spec {
+        for pair in spec.split(',') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let k = k.trim();
+                if !k.is_empty() {
+                    map.insert(k.to_string(), v.trim().to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// 설정 저장 실패를 로그로 남긴다 (커맨드는 실패해도 계속 진행).
+fn log_save_failure(e: &crate::config::ConfigError) {
+    tracing::error!(
+        "{}",
+        crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+    );
+}
+
+/// `/endpoint` 의 관리 서브커맨드(add·set·use·remove·list)를 처리한다.
+///
+/// `current` 는 이 세션에서 활성으로 쓰는 엔드포인트 이름(`--endpoint` 오버라이드
+/// 포함)이다. `cfg` 를 직접 수정·저장하고 `(표시 메시지, 새 활성 이름)` 을
+/// 반환한다. 둘째 값이 `Some` 이면 호출부가 세션의 활성 엔드포인트를 그 이름으로
+/// 바꿔야 한다.
+fn endpoint_admin(
+    cfg: &mut Config,
+    current: &str,
+    args: &str,
+    persist: bool,
+) -> (String, Option<String>) {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    match tokens.first().copied() {
+        None => (endpoint_text(cfg, current, ""), None),
+        Some("list") => (endpoint_list_text(cfg, current), None),
+        Some("add") => endpoint_add_command(cfg, &tokens[1..], persist),
+        Some("set") => endpoint_set_command(cfg, &tokens[1..], persist),
+        Some("use") => endpoint_use_command(cfg, &tokens[1..], persist),
+        Some("remove") => endpoint_remove_command(cfg, &tokens[1..], persist),
+        // 그 외에는 엔드포인트 이름 조회로 본다 (기존 `/endpoint <name>` 동작 유지).
+        Some(_) => (endpoint_text(cfg, current, args.trim()), None),
+    }
+}
+
+/// `/endpoint add <name> url=.. model=.. [key=..] [context_tokens=N] [vision=on|off] [thinking=on|off]`.
+fn endpoint_add_command(
+    cfg: &mut Config,
+    tokens: &[&str],
+    persist: bool,
+) -> (String, Option<String>) {
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return (
+            crate::i18n::tr(
+                "Usage: /endpoint add <name> url=<url> model=<model> [key=<api_key>] [context_tokens=N] [vision=on|off] [thinking=on|off]",
+            )
+            .to_string(),
+            None,
+        );
+    };
+    let kv = parse_kv(&tokens[1..]);
+    let missing = |field: &str| crate::i18n::tr_fmt("Missing required field: {field}", &[field]);
+    let Some(url) = kv_get(&kv, &["url"]) else {
+        return (missing("url"), None);
+    };
+    let Some(model) = kv_get(&kv, &["model"]) else {
+        return (missing("model"), None);
+    };
+    let spec = crate::endpoint::EndpointAddSpec {
+        name: name.to_string(),
+        url,
+        api_key: kv_get(&kv, &["key", "api_key"]),
+        model,
+        context_tokens: kv_get(&kv, &["context_tokens", "ctx"])
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0),
+        vision: kv_get(&kv, &["vision"])
+            .map(|v| parse_bool(&v, false))
+            .unwrap_or(false),
+        thinking: kv_get(&kv, &["thinking"])
+            .map(|v| parse_bool(&v, false))
+            .unwrap_or(false),
+    };
+    let before = cfg.active_endpoint.clone();
+    if let Err(e) = crate::endpoint::add_endpoint(cfg, &spec) {
+        return (e.to_string(), None);
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    let activated = if cfg.active_endpoint != before {
+        cfg.active_endpoint.clone()
+    } else {
+        None
+    };
+    (
+        crate::i18n::tr_fmt("Registered endpoint '{name}'.", &[name]),
+        activated,
+    )
+}
+
+/// `/endpoint set <name> <field>=<value> [<field2>=<value2> ...]`.
+fn endpoint_set_command(
+    cfg: &mut Config,
+    tokens: &[&str],
+    persist: bool,
+) -> (String, Option<String>) {
+    let usage = || crate::i18n::tr("Usage: /endpoint set <name> <field>=<value>").to_string();
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return (usage(), None);
+    };
+    let kv = parse_kv(&tokens[1..]);
+    if kv.is_empty() {
+        return (usage(), None);
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for (field, value) in &kv {
+        // bool 필드는 `on|off` 표기도 허용하도록 정규화한다.
+        let normalized = match field.as_str() {
+            "vision" | "thinking" => parse_bool(value, false).to_string(),
+            _ => value.clone(),
+        };
+        if let Err(e) = crate::endpoint::set_endpoint_field(cfg, name, field, &normalized) {
+            return (e.to_string(), None);
+        }
+        if field == "api_key" || field == "key" {
+            let key = if crate::endpoint::is_key_sentinel(value) {
+                "Endpoint '{name}' api_key unchanged"
+            } else {
+                "Endpoint '{name}' api_key updated (value hidden)"
+            };
+            lines.push(crate::i18n::tr_fmt(key, &[name]));
+        } else {
+            lines.push(crate::i18n::tr_fmt(
+                "Endpoint '{name}' {field} = {value}",
+                &[name, field, value],
+            ));
+        }
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    (lines.join("\n"), None)
+}
+
+/// `/endpoint use <name>` — 활성 엔드포인트 전환.
+fn endpoint_use_command(
+    cfg: &mut Config,
+    tokens: &[&str],
+    persist: bool,
+) -> (String, Option<String>) {
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return (
+            crate::i18n::tr("Usage: /endpoint use <name>").to_string(),
+            None,
+        );
+    };
+    if let Err(e) = crate::endpoint::use_endpoint(cfg, name) {
+        return (e.to_string(), None);
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    (
+        crate::i18n::tr_fmt("Activated endpoint '{name}'.", &[name]),
+        Some(name.to_string()),
+    )
+}
+
+/// `/endpoint remove <name>` — 엔드포인트 삭제.
+fn endpoint_remove_command(
+    cfg: &mut Config,
+    tokens: &[&str],
+    persist: bool,
+) -> (String, Option<String>) {
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return (
+            crate::i18n::tr("Usage: /endpoint remove <name>").to_string(),
+            None,
+        );
+    };
+    if let Err(e) = crate::endpoint::remove_endpoint(cfg, name) {
+        return (e.to_string(), None);
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    (
+        crate::i18n::tr_fmt("Removed endpoint '{name}'.", &[name]),
+        None,
+    )
+}
+
+/// `/mcp` 의 관리 서브커맨드(add·set·remove·list)를 처리한다.
+///
+/// 등록된 MCP 서버는 도구 레지스트리가 세션 시작 시 구성되므로 **다음 세션**부터
+/// 모델 도구로 사용할 수 있다. 여기서는 설정 파일에 영속화만 한다.
+fn mcp_admin(cfg: &mut Config, args: &str, persist: bool) -> String {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    match tokens.first().copied() {
+        None | Some("list") => mcp_list_text(cfg),
+        Some("add") => mcp_add_command(cfg, &tokens[1..], persist),
+        Some("set") => mcp_set_command(cfg, &tokens[1..], persist),
+        Some("remove") => mcp_remove_command(cfg, &tokens[1..], persist),
+        // 그 외에는 MCP 서버 이름 조회로 본다.
+        Some(_) => mcp_text(cfg, args.trim()),
+    }
+}
+
+/// `/mcp add <name> cmd=<command> [args=<a1,a2>] [env=K=V,K2=V2] [desc=<text>]`.
+fn mcp_add_command(cfg: &mut Config, tokens: &[&str], persist: bool) -> String {
+    let usage = || {
+        crate::i18n::tr(
+            "Usage: /mcp add <name> cmd=<command> [args=<a1,a2>] [env=K=V,K2=V2] [desc=<text>]",
+        )
+        .to_string()
+    };
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return usage();
+    };
+    let kv = parse_kv(&tokens[1..]);
+    let Some(command) = kv_get(&kv, &["cmd", "command"]) else {
+        return crate::i18n::tr_fmt("Missing required field: {field}", &["cmd"]);
+    };
+    let args_vec = kv_get(&kv, &["args"])
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let description = kv_get(&kv, &["desc", "description"]).filter(|d| !d.is_empty());
+    cfg.mcp.insert(
+        name.to_string(),
+        McpConfig {
+            command,
+            args: args_vec,
+            env: parse_env_map(kv_get(&kv, &["env"]).as_deref()),
+            description,
+        },
+    );
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    crate::i18n::tr_fmt(
+        "Registered MCP server '{name}'. (available from the next session)",
+        &[name],
+    )
+}
+
+/// `/mcp set <name> <field>=<value>` — command·args·env·description 수정.
+fn mcp_set_command(cfg: &mut Config, tokens: &[&str], persist: bool) -> String {
+    let usage = || crate::i18n::tr("Usage: /mcp set <name> <field>=<value>").to_string();
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return usage();
+    };
+    let kv = parse_kv(&tokens[1..]);
+    if kv.is_empty() {
+        return usage();
+    }
+    if !cfg.mcp.contains_key(name) {
+        return crate::i18n::tr_fmt(
+            "MCP server not found: {name}\n{list}",
+            &[name, &mcp_list_text(cfg)],
+        );
+    }
+    let mut lines: Vec<String> = Vec::new();
+    {
+        let m = cfg.mcp.get_mut(name).unwrap();
+        for (field, value) in &kv {
+            match field.as_str() {
+                "command" | "cmd" => {
+                    m.command = value.clone();
+                    lines.push(crate::i18n::tr_fmt(
+                        "MCP server '{name}' {field} = {value}",
+                        &[name, "command", value],
+                    ));
+                }
+                "args" => {
+                    m.args = value
+                        .split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect();
+                    lines.push(crate::i18n::tr_fmt(
+                        "MCP server '{name}' {field} = {value}",
+                        &[name, "args", value],
+                    ));
+                }
+                "env" => {
+                    m.env = parse_env_map(Some(value));
+                    lines.push(crate::i18n::tr_fmt(
+                        "MCP server '{name}' {field} = {value}",
+                        &[
+                            name,
+                            "env (keys only)",
+                            &m.env.keys().cloned().collect::<Vec<_>>().join(","),
+                        ],
+                    ));
+                }
+                "desc" | "description" => {
+                    m.description = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.clone())
+                    };
+                    lines.push(crate::i18n::tr_fmt(
+                        "MCP server '{name}' {field} = {value}",
+                        &[name, "description", value],
+                    ));
+                }
+                other => {
+                    return crate::i18n::tr_fmt("Unknown MCP field: {field}", &[other]);
+                }
+            }
+        }
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    lines.join("\n")
+}
+
+/// `/mcp remove <name>` — MCP 서버 삭제.
+fn mcp_remove_command(cfg: &mut Config, tokens: &[&str], persist: bool) -> String {
+    let Some(name) = tokens.first().copied().filter(|n| !n.is_empty()) else {
+        return crate::i18n::tr("Usage: /mcp remove <name>").to_string();
+    };
+    if cfg.mcp.remove(name).is_none() {
+        return crate::i18n::tr_fmt(
+            "MCP server not found: {name}\n{list}",
+            &[name, &mcp_list_text(cfg)],
+        );
+    }
+    if persist {
+        if let Err(e) = cfg.save() {
+            log_save_failure(&e);
+        }
+    }
+    crate::i18n::tr_fmt("Removed MCP server '{name}'.", &[name])
+}
+
 /// `/mcp` — MCP 서버 조회 텍스트. `args` 가 비면 목록, 있으면 해당 이름 상세.
 fn mcp_text(cfg: &Config, args: &str) -> String {
     let name = args.trim();
@@ -2325,5 +2740,101 @@ mod tests {
         assert!(text.contains("other (current)"));
         assert!(text.contains("qwen3.8-27b-q2"));
         assert!(!text.contains("qwen3.8-27b-q2 (current)"));
+    }
+
+    /// `/endpoint` 관리 서브커맨드: add → set → use → remove.
+    #[test]
+    fn endpoint_admin_add_set_use_remove() {
+        let mut cfg = crate::config::Config::new();
+        let (msg, activated) = endpoint_admin(
+            &mut cfg,
+            "",
+            "add local url=http://127.0.0.1:8084/v1 model=qwen3 key=sk-x context_tokens=8192 vision=on",
+            false,
+        );
+        assert!(msg.contains("Registered endpoint 'local'"), "{msg}");
+        assert_eq!(activated.as_deref(), Some("local"));
+        assert_eq!(cfg.endpoints["local"].context_tokens, 8192);
+        assert!(cfg.endpoints["local"].vision);
+        assert!(!cfg.endpoints["local"].thinking);
+
+        let (msg, _) = endpoint_admin(
+            &mut cfg,
+            "local",
+            "set local model=qwen4 thinking=on",
+            false,
+        );
+        assert!(msg.contains("model = qwen4"), "{msg}");
+        assert!(msg.contains("thinking = on"), "{msg}");
+        assert_eq!(cfg.endpoints["local"].model, "qwen4");
+        assert!(cfg.endpoints["local"].thinking);
+
+        let _ = endpoint_admin(
+            &mut cfg,
+            "local",
+            "add backup url=http://x/v1 model=m",
+            false,
+        );
+        let (msg, activated) = endpoint_admin(&mut cfg, "local", "use backup", false);
+        assert!(msg.contains("Activated endpoint 'backup'"), "{msg}");
+        assert_eq!(activated.as_deref(), Some("backup"));
+        assert_eq!(cfg.active_endpoint.as_deref(), Some("backup"));
+
+        let (msg, activated) = endpoint_admin(&mut cfg, "backup", "remove backup", false);
+        assert!(msg.contains("Removed endpoint 'backup'"), "{msg}");
+        assert!(activated.is_none());
+        assert!(!cfg.endpoints.contains_key("backup"));
+    }
+
+    /// `/endpoint add` 는 필수 항목 누락을 안내하고, 이름만 준 입력은 상세 조회로 폴백한다.
+    #[test]
+    fn endpoint_admin_reports_usage_and_errors() {
+        let mut cfg = crate::config::Config::new();
+        let (msg, activated) = endpoint_admin(&mut cfg, "", "add x url=http://x/v1", false);
+        assert!(msg.contains("Missing required field: model"), "{msg}");
+        assert!(activated.is_none());
+        assert!(!cfg.endpoints.contains_key("x"));
+
+        let (msg, _) = endpoint_admin(&mut cfg, "", "nope", false);
+        assert!(msg.contains("Endpoint not found: nope"), "{msg}");
+    }
+
+    /// `/mcp` 관리 서브커맨드: add → set → remove.
+    #[test]
+    fn mcp_admin_add_set_remove() {
+        let mut cfg = crate::config::Config::new();
+        let msg = mcp_admin(
+            &mut cfg,
+            "add files cmd=npx args=-y,@modelcontextprotocol/server-filesystem,/home/me env=FOO=bar desc=fs",
+            false,
+        );
+        assert!(msg.contains("Registered MCP server 'files'"), "{msg}");
+        let m = &cfg.mcp["files"];
+        assert_eq!(m.command, "npx");
+        assert_eq!(
+            m.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/home/me"]
+        );
+        assert_eq!(m.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(m.description.as_deref(), Some("fs"));
+
+        let msg = mcp_admin(&mut cfg, "set files command=uvx args=a,b", false);
+        assert!(msg.contains("command = uvx"), "{msg}");
+        assert!(msg.contains("args = a,b"), "{msg}");
+        assert_eq!(cfg.mcp["files"].command, "uvx");
+        assert_eq!(cfg.mcp["files"].args, vec!["a", "b"]);
+
+        let msg = mcp_admin(&mut cfg, "remove files", false);
+        assert!(msg.contains("Removed MCP server 'files'"), "{msg}");
+        assert!(cfg.mcp.is_empty());
+    }
+
+    /// `/mcp add` 는 cmd 누락 시 사용법을 안내한다.
+    #[test]
+    fn mcp_admin_requires_command() {
+        let mut cfg = crate::config::Config::new();
+        let msg = mcp_admin(&mut cfg, "add x", false);
+        assert!(msg.contains("Missing required field: cmd"), "{msg}");
+        assert!(cfg.mcp.is_empty());
     }
 }

@@ -110,14 +110,14 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "reasoning effort を設定",
     ),
     (
-        "Show endpoint config (active / all / named)",
-        "엔드포인트 설정 조회 (활성·전체·특정 이름)",
-        "エンドポイント設定の表示 (有効・全件・指定名)",
+        "Show or configure endpoints (list / add / set / use / remove)",
+        "엔드포인트 설정 조회·변경 (목록·추가·수정·활성화·삭제)",
+        "エンドポイント設定の表示・変更 (一覧・追加・変更・有効化・削除)",
     ),
     (
-        "Show MCP servers (list / named detail)",
-        "MCP 서버 조회 (목록·특정 이름 상세)",
-        "MCP サーバーの表示 (一覧・指定名の詳細)",
+        "Show or register MCP servers (list / add / set / remove)",
+        "MCP 서버 조회·등록 (목록·추가·수정·삭제)",
+        "MCP サーバーの表示・登録 (一覧・追加・変更・削除)",
     ),
     (
         "Show current session info (id / model / context usage)",
@@ -428,6 +428,46 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "登録済みのエンドポイントがありません。",
     ),
     ("Endpoint list:", "엔드포인트 목록:", "エンドポイント一覧:"),
+    (
+        "Registered endpoint '{name}'.",
+        "엔드포인트 '{name}' 을(를) 등록했습니다.",
+        "エンドポイント '{name}' を登録しました。",
+    ),
+    (
+        "Removed endpoint '{name}'.",
+        "엔드포인트 '{name}' 을(를) 삭제했습니다.",
+        "エンドポイント '{name}' を削除しました。",
+    ),
+    (
+        "Activated endpoint '{name}'.",
+        "엔드포인트 '{name}' 을(를) 활성화했습니다.",
+        "エンドポイント '{name}' を有効化しました。",
+    ),
+    (
+        "Usage: /endpoint add <name> url=<url> model=<model> [key=<api_key>] [context_tokens=N] [vision=on|off] [thinking=on|off]",
+        "사용법: /endpoint add <이름> url=<url> model=<모델> [key=<api_key>] [context_tokens=N] [vision=on|off] [thinking=on|off]",
+        "使い方: /endpoint add <名前> url=<url> model=<モデル> [key=<api_key>] [context_tokens=N] [vision=on|off] [thinking=on|off]",
+    ),
+    (
+        "Usage: /endpoint set <name> <field>=<value>",
+        "사용법: /endpoint set <이름> <필드>=<값>",
+        "使い方: /endpoint set <名前> <フィールド>=<値>",
+    ),
+    (
+        "Usage: /endpoint use <name>",
+        "사용법: /endpoint use <이름>",
+        "使い方: /endpoint use <名前>",
+    ),
+    (
+        "Usage: /endpoint remove <name>",
+        "사용법: /endpoint remove <이름>",
+        "使い方: /endpoint remove <名前>",
+    ),
+    (
+        "Missing required field: {field}",
+        "필수 항목이 없습니다: {field}",
+        "必須項目がありません: {field}",
+    ),
     // ── /mcp ──────────────────────────────────────────
     (
         "MCP server not found: {name}\n{list}",
@@ -443,6 +483,41 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "MCP サーバー: {name}",
     ),
     ("  description: {d}", "  설명: {d}", "  説明: {d}"),
+    (
+        "Registered MCP server '{name}'. (available from the next session)",
+        "MCP 서버 '{name}' 을(를) 등록했습니다. (다음 세션부터 사용 가능)",
+        "MCP サーバー '{name}' を登録しました。(次のセッションから利用可能)",
+    ),
+    (
+        "Removed MCP server '{name}'.",
+        "MCP 서버 '{name}' 을(를) 삭제했습니다.",
+        "MCP サーバー '{name}' を削除しました。",
+    ),
+    (
+        "MCP server '{name}' {field} = {value}",
+        "MCP 서버 '{name}' {field} = {value}",
+        "MCP サーバー '{name}' {field} = {value}",
+    ),
+    (
+        "Usage: /mcp add <name> cmd=<command> [args=<a1,a2>] [env=K=V,K2=V2] [desc=<text>]",
+        "사용법: /mcp add <이름> cmd=<명령> [args=<인자1,인자2>] [env=키=값,키2=값2] [desc=<설명>]",
+        "使い方: /mcp add <名前> cmd=<コマンド> [args=<引数1,引数2>] [env=キー=値,キー2=値2] [desc=<説明>]",
+    ),
+    (
+        "Usage: /mcp set <name> <field>=<value>",
+        "사용법: /mcp set <이름> <필드>=<값>",
+        "使い方: /mcp set <名前> <フィールド>=<値>",
+    ),
+    (
+        "Usage: /mcp remove <name>",
+        "사용법: /mcp remove <이름>",
+        "使い方: /mcp remove <名前>",
+    ),
+    (
+        "Unknown MCP field: {field}",
+        "지원하지 않는 MCP 필드입니다: {field}",
+        "未対応の MCP フィールドです: {field}",
+    ),
     // ── /session-info ─────────────────────────────────
     ("cwd: {cwd}", "cwd: {cwd}", "cwd: {cwd}"),
     ("Endpoint: {ep}", "엔드포인트: {ep}", "エンドポイント: {ep}"),
@@ -688,6 +763,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "Endpoint '{name}' api_key unchanged",
         "엔드포인트 '{name}' api_key 변경 없음",
         "エンドポイント '{name}' の api_key は変更なし",
+    ),
+    (
+        "Endpoint '{name}' api_key updated (value hidden)",
+        "엔드포인트 '{name}' api_key 를 변경했습니다 (값은 숨김)",
+        "エンドポイント '{name}' の api_key を変更しました (値は非表示)",
     ),
     (
         "Endpoint '{name}' {field} = {value}",
