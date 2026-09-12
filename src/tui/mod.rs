@@ -1354,14 +1354,19 @@ fn push_tool_event(lines: &mut Vec<ChatLine>, ev: crate::llm::ToolEvent) {
     }
 }
 
-/// 입력창 렌더링. `cursor` 는 바이트 인덱스이며, 그 위치의 문자를 역색
-/// 스팬으로 그려 커서를 표시한다 (끝이면 빈 역색 스팬).
+/// 입력창 렌더링. `cursor` 는 바이트 인덱스이며, 그 위치를 블록 셀로 칠해
+/// 커서를 표시한다 (줄 끝·빈 입력이어도 보이도록 공백 셀을 그린다). 추가로
+/// 래핑이 없는 경우 실제 터미널 커서도 그 자리에 배치해 포커스를 보여 준다.
 /// 입력에 줄바꿈이 있으면 여러 줄로 렌더하고, 커서가 속한 줄이 보이도록
 /// 세로 스크롤한다.
 fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
     let title = "입력 (Enter 전송 · Shift+Enter 줄바꿈 · ↑↓ 히스토리 · Tab 자동완성 · Ctrl+T 생각 · Ctrl+Q 종료)";
-    // 커서 표시: [cursor 앞][커서 문자(역색)][cursor 뒤]
-    let inv = Style::default().add_modifier(Modifier::REVERSED);
+    // 커서 표시: [cursor 앞][커서 셀(블록)][cursor 뒤]. 커서가 줄 끝이거나
+    // 입력이 비어 있으면 문자 스팬이 비어 보이지 않으므로 공백 셀을 그린다.
+    let cursor_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let cc = cursor.min(input.len());
     let mut off = 0usize;
     let lines: Vec<Line> = input
@@ -1372,9 +1377,10 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
             off += l.len() + 1; // '\n' 바이트 포함
             if cc >= lstart && cc <= lend {
                 let (before, cur, after) = split_cursor(l, cc - lstart);
+                let cur = if cur.is_empty() { " ".to_string() } else { cur };
                 Line::from(vec![
                     Span::raw(before),
-                    Span::styled(cur, inv),
+                    Span::styled(cur, cursor_style),
                     Span::raw(after),
                 ])
             } else {
@@ -1395,6 +1401,33 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     f.render_widget(p, area);
+
+    // 실제 터미널 커서를 입력 위치로 옮겨 깜빡이는 커서로 포커스를 보여 준다.
+    // word wrap 이 일어나면 화면 좌표가 어긋나므로, 어떤 논리 줄도 폭을
+    // 넘지 않을 때만 배치한다 (넘치면 블록 셀 커서가 대신 표시된다).
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if inner_h > 0 {
+        if let Some((col, line)) = input_cursor_pos(input, cc, inner_w) {
+            let x = area.x + 1 + col as u16;
+            let y = area.y + 1 + (line - scroll) as u16;
+            if x < area.x + area.width - 1 && y < area.y + area.height - 1 {
+                f.set_cursor_position((x, y));
+            }
+        }
+    }
+}
+
+/// 입력 커서의 `(표시 열, 논리 줄)` 을 계산한다. 모든 논리 줄이 폭 `inner_w`
+/// 안에 들어가 래핑이 없을 때만 `Some` 을 반환한다. 래핑이 일어나면 화면
+/// 좌표를 단순 계산으로 알 수 없어 `None` (블록 셀 커서로 대체).
+fn input_cursor_pos(input: &str, cursor: usize, inner_w: usize) -> Option<(usize, usize)> {
+    if inner_w == 0 || input.split('\n').any(|l| text_width(l) > inner_w) {
+        return None;
+    }
+    let cc = cursor.min(input.len());
+    let line = input[..cc].matches('\n').count();
+    let line_start = input[..cc].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    Some((text_width(&input[line_start..cc]), line))
 }
 
 /// 자동완성 드롭다운에 한 번에 보여 줄 항목 수.
@@ -1804,6 +1837,31 @@ mod tests {
         assert_eq!((s.as_str(), c), ("hello", 5));
         set_input(&mut s, &mut c, String::new());
         assert_eq!((s.as_str(), c), ("", 0));
+    }
+
+    /// input_cursor_pos: 빈 입력·줄 끝·여러 줄·한글의 (표시 열, 논리 줄).
+    #[test]
+    fn input_cursor_pos_various() {
+        // 빈 입력은 첫 줄 첫 열.
+        assert_eq!(input_cursor_pos("", 0, 80), Some((0, 0)));
+        // 한 줄 끝/중간.
+        assert_eq!(input_cursor_pos("hello", 5, 80), Some((5, 0)));
+        assert_eq!(input_cursor_pos("hello", 2, 80), Some((2, 0)));
+        // 둘째 줄 시작/끝 (바이트 인덱스: "ab\ncd" 에서 'c'=3, 끝=5).
+        assert_eq!(input_cursor_pos("ab\ncd", 3, 80), Some((0, 1)));
+        assert_eq!(input_cursor_pos("ab\ncd", 5, 80), Some((2, 1)));
+        // 한글은 표시 폭 2 기준.
+        assert_eq!(input_cursor_pos("한글", 3, 80), Some((2, 0)));
+    }
+
+    /// input_cursor_pos: 폭을 넘는 줄(래핑)이거나 폭이 0 이면 None.
+    #[test]
+    fn input_cursor_pos_none_when_wrapped() {
+        assert_eq!(input_cursor_pos("hello", 5, 0), None);
+        // 정확히 폭에 맞으면 래핑 아님.
+        assert_eq!(input_cursor_pos("hello", 5, 5), Some((5, 0)));
+        // 한 줄이라도 넘치면 좌표를 알 수 없어 None.
+        assert_eq!(input_cursor_pos("hello world", 5, 5), None);
     }
 
     /// TTY 가 아니면 run_tui 는 None 을 반환한다 (스트림 텍스트 폴백).
