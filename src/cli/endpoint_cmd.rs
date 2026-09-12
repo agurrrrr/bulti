@@ -21,17 +21,24 @@ pub fn run(args: EndpointArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::err
                 },
             )?;
             cfg.save()?;
-            println!("엔드포인트 '{}' 등록 완료", a.name);
+            println!(
+                "{}",
+                crate::i18n::tr_fmt("Registered endpoint '{name}'", &[&a.name])
+            );
             Ok(0)
         }
         EndpointCommand::List => {
             let rows = endpoint::list_endpoints(cfg);
             if rows.is_empty() {
-                println!("등록된 엔드포인트가 없습니다.");
+                println!("{}", crate::i18n::tr("No endpoints registered."));
                 return Ok(0);
             }
             for r in &rows {
-                let active = if r.active { " (활성)" } else { "" };
+                let active = if r.active {
+                    crate::i18n::tr(" (active)")
+                } else {
+                    ""
+                };
                 let key = if r.api_key_masked.is_empty() {
                     "-".to_string()
                 } else {
@@ -40,7 +47,7 @@ pub fn run(args: EndpointArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::err
                 let ctx = if r.context_tokens > 0 {
                     r.context_tokens.to_string()
                 } else {
-                    "자동(프로브)".to_string()
+                    crate::i18n::tr("auto (probe)").to_string()
                 };
                 println!(
                     "{}{}\n  url: {}\n  api_key: {}\n  model: {}\n  context_tokens: {}\n",
@@ -52,27 +59,42 @@ pub fn run(args: EndpointArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::err
         EndpointCommand::Use { name } => {
             endpoint::use_endpoint(cfg, &name)?;
             cfg.save()?;
-            println!("활성 엔드포인트를 '{}' 로 전환했습니다", name);
+            println!(
+                "{}",
+                crate::i18n::tr_fmt("Activated endpoint '{name}'", &[&name])
+            );
             Ok(0)
         }
         EndpointCommand::Remove { name } => {
             endpoint::remove_endpoint(cfg, &name)?;
             cfg.save()?;
-            println!("엔드포인트 '{}' 제거 완료", name);
+            println!(
+                "{}",
+                crate::i18n::tr_fmt("Removed endpoint '{name}'", &[&name])
+            );
             Ok(0)
         }
         EndpointCommand::Set(s) => {
             let (field, value) = s
                 .field
                 .split_once('=')
-                .ok_or("set 은 `key=value` 형태여야 합니다")?;
+                .ok_or_else(|| crate::i18n::tr("set must be in `key=value` form").to_string())?;
             endpoint::set_endpoint_field(cfg, &s.name, field, value)?;
             cfg.save()?;
             // 키는 마스킹해서 출력.
             if field == "api_key" || field == "key" {
-                println!("엔드포인트 '{}' api_key 변경 없음", s.name);
+                println!(
+                    "{}",
+                    crate::i18n::tr_fmt("Endpoint '{name}' api_key unchanged", &[&s.name])
+                );
             } else {
-                println!("엔드포인트 '{}' {field} = {value}", s.name);
+                println!(
+                    "{}",
+                    crate::i18n::tr_fmt(
+                        "Endpoint '{name}' {field} = {value}",
+                        &[&s.name, field, value]
+                    )
+                );
             }
             Ok(0)
         }
@@ -80,15 +102,27 @@ pub fn run(args: EndpointArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::err
             let ep = cfg
                 .endpoints
                 .get(&name)
-                .ok_or_else(|| format!("엔드포인트를 찾을 수 없습니다: {name}"))?;
+                .ok_or_else(|| crate::i18n::tr_fmt("Endpoint not found: {name}", &[&name]))?;
             let rt = tokio::runtime::Runtime::new()?;
             match rt.block_on(endpoint::test_endpoint(ep))? {
                 endpoint::probe::ProbeOutcome::Ok => {
-                    println!("엔드포인트 '{}' 연결·인증 성공", name);
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "Endpoint '{name}' connection/auth succeeded",
+                            &[&name]
+                        )
+                    );
                     Ok(0)
                 }
                 endpoint::probe::ProbeOutcome::HttpError(status, body) => {
-                    eprintln!("⚠️  엔드포인트 '{}' 오류 {status}: {}", name, body);
+                    eprintln!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "⚠️  Endpoint '{name}' error {status}: {body}",
+                            &[&name, &status.to_string(), &body]
+                        )
+                    );
                     Ok(1)
                 }
             }
@@ -97,12 +131,15 @@ pub fn run(args: EndpointArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::err
             let ep = cfg
                 .endpoints
                 .get(&name)
-                .ok_or_else(|| format!("엔드포인트를 찾을 수 없습니다: {name}"))?;
+                .ok_or_else(|| crate::i18n::tr_fmt("Endpoint not found: {name}", &[&name]))?;
             let rt = tokio::runtime::Runtime::new()?;
             let report = rt.block_on(endpoint::probe_context(ep))?;
             println!(
-                "엔드포인트 '{}' 컨텍스트 길이: {} (근거: {})",
-                name, report.context_tokens, report.source
+                "{}",
+                crate::i18n::tr_fmt(
+                    "Endpoint '{name}' context length: {tokens} (source: {source})",
+                    &[&name, &report.context_tokens.to_string(), &report.source]
+                )
             );
             Ok(0)
         }

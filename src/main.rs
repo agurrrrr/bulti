@@ -51,15 +51,23 @@ fn main() -> ExitCode {
     let mut cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
-            tracing::error!("설정 로드 실패: {e}");
+            tracing::error!(
+                "{}",
+                bulti::i18n::tr_fmt("Settings load failed: {e}", &[&e.to_string()])
+            );
             return ExitCode::from(1);
         }
     };
+    // 설정에 저장된 언어를 전역으로 적용한다 (기본 영어).
+    bulti::i18n::set_language(cfg.language);
 
     match cli::dispatch(cli, &mut cfg) {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
-            tracing::error!("실행 오류: {e}");
+            tracing::error!(
+                "{}",
+                bulti::i18n::tr_fmt("Execution error: {e}", &[&e.to_string()])
+            );
             ExitCode::from(1)
         }
     }

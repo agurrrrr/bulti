@@ -18,11 +18,14 @@ pub struct SlashCommand {
 }
 
 /// 내장 슬래시 커맨드 목록 (자동완성·파싱 공용).
+///
+/// `description`·`usage` 는 i18n 키(영어 원문)다. 표시 시 `crate::i18n::tr` 로
+/// 현재 언어로 번역한다.
 pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "exit",
         aliases: &["quit", "q"],
-        description: "대화 종료",
+        description: "Exit conversation",
         usage: "/exit",
         takes_args: false,
         args_required: false,
@@ -30,7 +33,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "new",
         aliases: &[],
-        description: "새 세션 시작",
+        description: "Start a new session",
         usage: "/new",
         takes_args: false,
         args_required: false,
@@ -38,7 +41,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "help",
         aliases: &["?"],
-        description: "명령 도움말",
+        description: "Command help",
         usage: "/help",
         takes_args: false,
         args_required: false,
@@ -46,7 +49,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "resume",
         aliases: &[],
-        description: "세션 재개",
+        description: "Resume a session",
         usage: "/resume <id>",
         takes_args: true,
         args_required: true,
@@ -54,7 +57,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "model",
         aliases: &["m"],
-        description: "모델 전환",
+        description: "Switch model",
         usage: "/model <name> [effort]",
         takes_args: true,
         args_required: true,
@@ -62,7 +65,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "effort",
         aliases: &["e"],
-        description: "reasoning effort 설정",
+        description: "Set reasoning effort",
         usage: "/effort <low|medium|high>",
         takes_args: true,
         args_required: true,
@@ -70,7 +73,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "endpoint",
         aliases: &["ep"],
-        description: "엔드포인트 설정 조회 (활성·전체·특정 이름)",
+        description: "Show endpoint config (active / all / named)",
         usage: "/endpoint [name]",
         takes_args: true,
         args_required: false,
@@ -78,15 +81,23 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "mcp",
         aliases: &[],
-        description: "MCP 서버 조회 (목록·특정 이름 상세)",
+        description: "Show MCP servers (list / named detail)",
         usage: "/mcp [name]",
+        takes_args: true,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "language",
+        aliases: &["lang", "l"],
+        description: "Change language (en / ko / ja)",
+        usage: "/language <en|ko|ja>",
         takes_args: true,
         args_required: false,
     },
     SlashCommand {
         name: "session-info",
         aliases: &["info"],
-        description: "현재 세션 정보 표시 (id·모델·컨텍스트 사용량)",
+        description: "Show current session info (id / model / context usage)",
         usage: "/session-info",
         takes_args: false,
         args_required: false,
@@ -94,7 +105,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "sessions",
         aliases: &["ls"],
-        description: "세션 목록 조회",
+        description: "List sessions",
         usage: "/sessions",
         takes_args: false,
         args_required: false,
@@ -102,7 +113,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "compact",
         aliases: &[],
-        description: "대화 히스토리 컴팩트 (요약으로 컨텍스트 축소)",
+        description: "Compact conversation history (summarize to shrink context)",
         usage: "/compact",
         takes_args: false,
         args_required: false,
@@ -110,7 +121,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "fork",
         aliases: &[],
-        description: "현재 세션을 분기 (새 세션 id 로 복제)",
+        description: "Fork the current session (copy to a new session id)",
         usage: "/fork",
         takes_args: false,
         args_required: false,
@@ -118,15 +129,15 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "export",
         aliases: &[],
-        description: "대화 기록 마크다운 파일로 내보내기",
-        usage: "/export [파일경로]",
+        description: "Export conversation history to a markdown file",
+        usage: "/export [path]",
         takes_args: true,
         args_required: false,
     },
     SlashCommand {
         name: "usage",
         aliases: &["u"],
-        description: "세션 토큰·비용 사용량 표시",
+        description: "Show session token and cost usage",
         usage: "/usage",
         takes_args: false,
         args_required: false,
@@ -134,8 +145,8 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "history",
         aliases: &["h"],
-        description: "프롬프트 히스토리 탐색 (↑/↓ 키 또는 이 커맨드로)",
-        usage: "/history [검색어]",
+        description: "Browse prompt history (↑/↓ keys or this command)",
+        usage: "/history [query]",
         takes_args: true,
         args_required: false,
     },
@@ -162,6 +173,8 @@ pub struct CompletionContext {
     pub endpoints: Vec<String>,
     /// MCP 서버 이름 후보 (`/mcp`).
     pub mcp: Vec<String>,
+    /// 언어 코드 후보 (`/language`).
+    pub languages: Vec<String>,
 }
 
 /// `cmd`(canonical name)에 대한 인자 후보와 설명 라벨을 반환한다.
@@ -171,9 +184,10 @@ fn arg_candidates<'a>(
     ctx: &'a CompletionContext,
 ) -> Option<(&'a [String], &'static str)> {
     match cmd {
-        "model" => Some((&ctx.models, "모델")),
-        "endpoint" => Some((&ctx.endpoints, "엔드포인트")),
-        "mcp" => Some((&ctx.mcp, "MCP 서버")),
+        "model" => Some((&ctx.models, "model")),
+        "endpoint" => Some((&ctx.endpoints, "endpoint")),
+        "mcp" => Some((&ctx.mcp, "MCP server")),
+        "language" => Some((&ctx.languages, "language")),
         _ => None,
     }
 }
@@ -204,7 +218,7 @@ pub fn suggest(query: &str) -> Vec<Suggestion> {
             out.push(Suggestion {
                 display: format!("/{c}"),
                 insert: format!("/{c}"),
-                description: cmd.description,
+                description: crate::i18n::tr(cmd.description),
             });
         }
     }
@@ -238,7 +252,7 @@ pub fn suggest_with(query: &str, ctx: &CompletionContext) -> Vec<Suggestion> {
             out.push(Suggestion {
                 display: c.clone(),
                 insert: format!("/{cmd} {c}"),
-                description: desc,
+                description: crate::i18n::tr(desc),
             });
         }
     }
@@ -453,6 +467,20 @@ mod tests {
         // 인자 후보가 없는 커맨드 뒤에서는 제안이 없다.
         assert!(suggest_with("/help foo", &ctx).is_empty());
         assert!(suggest_with("/exit ", &ctx).is_empty());
+    }
+
+    #[test]
+    fn registry_has_language_and_completes() {
+        assert!(suggest("").iter().any(|x| x.insert == "/language"));
+        assert_eq!(resolve_alias("lang"), "language");
+        assert!(is_supported("language"));
+        let ctx = CompletionContext {
+            languages: vec!["en".to_string(), "ko".to_string(), "ja".to_string()],
+            ..Default::default()
+        };
+        let s = suggest_with("/language ", &ctx);
+        assert_eq!(s.len(), 3);
+        assert!(s.iter().any(|x| x.insert == "/language ko"));
     }
 
     #[test]

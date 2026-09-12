@@ -18,74 +18,74 @@ use clap::{Parser, Subcommand};
 
 use crate::config::Config;
 
-/// 불티(Bulti) — 컨텍스트 핸드오프 체인으로 긴 작업을 끝까지 완결하는 CLI 에이전트.
+/// bulti — a CLI agent that completes long tasks via a context handoff chain.
 #[derive(Debug, Parser)]
 #[command(
     name = "bulti",
     version,
-    about = "불티(Bulti) CLI — 컨텍스트 핸드오프 체인 에이전트",
+    about = "bulti CLI — context handoff chain agent",
     subcommand_negates_reqs = true
 )]
 pub struct Cli {
-    /// 서브커맨드. 생략하면 대화형(chat) 모드로 바로 진입한다.
+    /// Subcommand. If omitted, enters interactive (chat) mode directly.
     #[command(subcommand)]
     pub command: Option<Command>,
-    /// 대화형(chat) 옵션 — 서브커맨드 없이 최상위에서도 사용할 수 있다.
+    /// Interactive (chat) options — also usable at the top level without a subcommand.
     #[command(flatten)]
     pub chat: ChatArgs,
 }
 
-/// 서브커맨드.
+/// Subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 대화형 채팅/TUI 모드.
+    /// Interactive chat/TUI mode.
     Chat(ChatArgs),
-    /// 세션 저장·재개 관리.
+    /// Manage saved/resumed sessions.
     Session(SessionArgs),
-    /// 에이전트 실행 (체인 실행).
+    /// Run the agent (chain execution).
     Run(RunArgs),
-    /// 엔드포인트 관리.
+    /// Manage endpoints.
     Endpoint(EndpointArgs),
-    /// 작업 히스토리 조회.
+    /// Query task history.
     History(HistoryArgs),
-    /// 스킬 목록·조회.
+    /// List and view skills.
     Skill(SkillArgs),
-    /// MCP 서버 목록.
+    /// List MCP servers.
     Mcp(McpArgs),
-    /// 시스템 프롬프트 관리.
+    /// Manage the system prompt.
     Prompt(PromptArgs),
-    /// 설정 조회·수정.
+    /// Get and set configuration.
     Config(ConfigArgs),
-    /// GitHub 릴리즈 자동 업데이트.
+    /// Automatic updates from GitHub releases.
     Update(UpdateArgs),
-    /// 버전 출력.
+    /// Print the version.
     Version(VersionArgs),
 }
 
 #[derive(Debug, clap::Args, Default)]
 pub struct ChatArgs {
-    /// 엔드포인트 이름.
+    /// Endpoint name.
     #[arg(long)]
     pub endpoint: Option<String>,
-    /// 모델 이름 오버라이드.
+    /// Model name override.
     #[arg(long)]
     pub model: Option<String>,
-    /// 시스템 프롬프트 파일.
+    /// System prompt file.
     #[arg(long)]
     pub system_file: Option<String>,
-    /// 인라인 시스템 프롬프트.
+    /// Inline system prompt.
     #[arg(long)]
     pub system: Option<String>,
-    /// 색상 비활성화.
+    /// Disable color.
     #[arg(long)]
     pub no_color: bool,
-    /// ratatui 대신 스트림 텍스트 모드로 대화 (DESIGN.md §4.13.1).
+    /// Converse in stream text mode instead of ratatui (DESIGN.md §4.13.1).
     #[arg(long)]
     pub no_tui: bool,
-    /// 대화 시작 시 첫 프롬프트 (비대화형 파이프용).
+    /// First prompt at startup (for non-interactive pipes).
     #[arg(long)]
     pub first: Option<String>,
-    /// 재개할 세션 id.
+    /// Session id to resume.
     #[arg(long)]
     pub resume: Option<String>,
 }
@@ -98,42 +98,42 @@ pub struct SessionArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
-    /// 세션 목록.
+    /// List sessions.
     List,
-    /// 세션 삭제.
+    /// Delete a session.
     Delete { id: String },
 }
 
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
-    /// 프롬프트 (또는 `-` 로 stdin).
+    /// Prompt (or `-` for stdin).
     #[arg(required = true)]
     pub prompt: String,
-    /// 엔드포인트 이름.
+    /// Endpoint name.
     #[arg(long)]
     pub endpoint: Option<String>,
-    /// 모델 이름 오버라이드.
+    /// Model name override.
     #[arg(long)]
     pub model: Option<String>,
-    /// 시스템 프롬프트 파일.
+    /// System prompt file.
     #[arg(long)]
     pub system_file: Option<String>,
-    /// 인라인 시스템 프롬프트.
+    /// Inline system prompt.
     #[arg(long)]
     pub system: Option<String>,
-    /// JSON 보고서 출력.
+    /// Output a JSON report.
     #[arg(long)]
     pub json: bool,
-    /// 진행 출력 억제.
+    /// Suppress progress output.
     #[arg(long)]
     pub quiet: bool,
-    /// 색상 비활성화.
+    /// Disable color.
     #[arg(long)]
     pub no_color: bool,
-    /// 최대 실행 시간(초).
+    /// Maximum run time (seconds).
     #[arg(long)]
     pub max_time: Option<u64>,
-    /// 최대 핸드오프 깊이.
+    /// Maximum handoff depth.
     #[arg(long)]
     pub max_handoff_depth: Option<u32>,
 }
@@ -146,19 +146,19 @@ pub struct EndpointArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum EndpointCommand {
-    /// 엔드포인트 등록.
+    /// Register an endpoint.
     Add(EndpointAddArgs),
-    /// 엔드포인트 목록.
+    /// List endpoints.
     List,
-    /// 활성 엔드포인트 전환.
+    /// Activate an endpoint.
     Use { name: String },
-    /// 엔드포인트 제거.
+    /// Remove an endpoint.
     Remove { name: String },
-    /// 엔드포인트 필드 수정.
+    /// Modify an endpoint field.
     Set(EndpointSetArgs),
-    /// 연결·인증 확인.
+    /// Check connectivity and authentication.
     Test { name: String },
-    /// 컨텍스트 길이 프로브.
+    /// Probe the context length.
     Probe { name: String },
 }
 
@@ -182,7 +182,7 @@ pub struct EndpointAddArgs {
 #[derive(Debug, clap::Args)]
 pub struct EndpointSetArgs {
     pub name: String,
-    /// `key=value` 형태.
+    /// In `key=value` form.
     pub field: String,
 }
 
@@ -194,30 +194,30 @@ pub struct HistoryArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum HistoryCommand {
-    /// 최근 작업 목록.
+    /// List recent tasks.
     List(HistoryListArgs),
-    /// 작업 상세 조회.
+    /// Show task details.
     Show { id: String },
-    /// 마지막 작업 조회.
+    /// Show the last task.
     Last(HistoryLastArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub struct HistoryListArgs {
-    /// 조회할 최근 개수.
+    /// Number of recent tasks to show.
     #[arg(short = 'n', long)]
     pub n: Option<u64>,
-    /// 상태 필터 (running|completed|failed|incomplete|interrupted).
+    /// Status filter (running|completed|failed|incomplete|interrupted).
     #[arg(long)]
     pub status: Option<String>,
-    /// 체인 ID 필터.
+    /// Chain id filter.
     #[arg(long)]
     pub chain: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct HistoryLastArgs {
-    /// 해당 체인의 마지막 작업 조회.
+    /// Show the last task of the chain.
     #[arg(long)]
     pub chain: bool,
 }
@@ -230,22 +230,22 @@ pub struct SkillArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SkillCommand {
-    /// 스킬 목록.
+    /// List skills.
     List,
-    /// 스킬 상세 조회.
+    /// Show skill details.
     Show { name: String },
 }
 
 #[derive(Debug, clap::Args)]
 pub struct McpArgs {
-    /// MCP 서버 목록.
+    /// List MCP servers.
     #[command(subcommand)]
     pub command: McpCommand,
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub enum McpCommand {
-    /// MCP 서버 목록.
+    /// List MCP servers.
     List,
 }
 
@@ -257,9 +257,9 @@ pub struct PromptArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PromptCommand {
-    /// 프롬프트 표시.
+    /// Show the prompt.
     Show,
-    /// 프롬프트 편집.
+    /// Edit the prompt.
     Edit,
 }
 
@@ -271,24 +271,24 @@ pub struct ConfigArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum ConfigCommand {
-    /// 설정 값 조회.
+    /// Get a config value.
     Get { key: String },
-    /// 설정 값 수정.
+    /// Set a config value.
     Set { key: String, value: String },
-    /// 설정 전체 목록.
+    /// List all config values.
     List,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct UpdateArgs {
-    /// 업데이트 확인만 수행.
+    /// Only check for updates.
     #[arg(long)]
     pub check: bool,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct VersionArgs {
-    /// JSON 형태 버전 출력.
+    /// Print the version as JSON.
     #[arg(long)]
     pub json: bool,
 }

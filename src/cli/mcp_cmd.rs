@@ -10,10 +10,13 @@ pub fn run(args: McpArgs, cfg: &Config) -> Result<i32, Box<dyn std::error::Error
     match args.command {
         McpCommand::List => {
             if cfg.mcp.is_empty() {
-                println!("(MCP 서버 없음)");
+                println!("{}", crate::i18n::tr("(no MCP server)"));
             } else {
                 for (name, m) in &cfg.mcp {
-                    let desc = m.description.as_deref().unwrap_or("(설명 없음)");
+                    let desc = m
+                        .description
+                        .as_deref()
+                        .unwrap_or(crate::i18n::tr("(no description)"));
                     println!("{name} — {desc}");
                 }
             }

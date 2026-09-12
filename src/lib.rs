@@ -12,6 +12,7 @@ pub mod completion;
 pub mod config;
 pub mod endpoint;
 pub mod history;
+pub mod i18n;
 pub mod llm;
 pub mod mcp;
 pub mod prompt;

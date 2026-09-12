@@ -28,12 +28,12 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Terminal;
 
 /// 진행 중 턴: 델타 수신 채널 + 작업 스레드 핸들.
 type PendingTurn = Option<(
@@ -400,11 +400,7 @@ where
                 .flatten()
                 .map(|t| {
                     let ms = t.elapsed().as_millis() as u64;
-                    (
-                        spinner((ms / 100) as usize),
-                        turn_phase(&lines),
-                        ms,
-                    )
+                    (spinner((ms / 100) as usize), turn_phase(&lines), ms)
                 });
 
             draw_title(
@@ -476,7 +472,13 @@ where
                     if !turn.files_touched.is_empty() {
                         lines.push(ChatLine {
                             role: Role::Status,
-                            text: format!("📝 modified: {}", turn.files_touched.join(", ")),
+                            text: format!(
+                                "📝 {}",
+                                crate::i18n::tr_fmt(
+                                    "modified: {}",
+                                    &[&turn.files_touched.join(", ")]
+                                )
+                            ),
                             ..ChatLine::default()
                         });
                     }
@@ -484,14 +486,15 @@ where
                 Ok(Err(e)) => {
                     lines.push(ChatLine {
                         role: Role::Status,
-                        text: format!("오류: {e}"),
+                        text: crate::i18n::tr_fmt("Error: {e}", &[&e.to_string()]),
                         ..ChatLine::default()
                     });
                 }
                 Err(_) => {
                     lines.push(ChatLine {
                         role: Role::Status,
-                        text: "오류: 턴 실행 스레드가 종료되었습니다".to_string(),
+                        text: crate::i18n::tr("Error: the turn execution thread has terminated")
+                            .to_string(),
                         ..ChatLine::default()
                     });
                 }
@@ -533,7 +536,7 @@ where
                 saved = true;
                 lines.push(ChatLine {
                     role: Role::Status,
-                    text: "세션은 매 턴 자동 저장됩니다".to_string(),
+                    text: crate::i18n::tr("Session is auto-saved every turn").to_string(),
                     ..ChatLine::default()
                 });
                 offset_from_bottom = 0;
@@ -804,14 +807,21 @@ fn draw_title(
 ) {
     let title = if let Some((frame, phase, elapsed_ms)) = progress {
         format!(
-            "불티(Bulti) — {frame} {phase} ({}) — {endpoint_name} / {model}",
-            format_elapsed(elapsed_ms)
+            "{} {} ({}) — {}",
+            frame,
+            phase,
+            format_elapsed(elapsed_ms),
+            crate::i18n::tr_fmt("Bulti Chat — {endpoint} / {model}", &[endpoint_name, model])
         )
     } else {
-        format!("불티(Bulti) 대화형 채팅 — {endpoint_name} / {model}")
+        crate::i18n::tr_fmt("Bulti Chat — {endpoint} / {model}", &[endpoint_name, model])
     };
     let p = Paragraph::new(title)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center);
     f.render_widget(p, area);
 }
@@ -845,11 +855,7 @@ fn split_cursor(s: &str, idx: usize) -> (String, String, String) {
         .find(|&i| b[i] < 0b1000_0000 || b[i] >= 0b1100_0000)
         .unwrap_or(b.len());
     let (cur, after) = rest.split_at(end);
-    (
-        before.to_string(),
-        cur.to_string(),
-        after.to_string(),
-    )
+    (before.to_string(), cur.to_string(), after.to_string())
 }
 
 /// 커서 위치 `cursor` 에 `c` 를 삽입하고 커서를 문자 뒤로 옮긴다.
@@ -865,7 +871,10 @@ fn delete_back(input: &mut String, cursor: &mut usize) {
         return;
     }
     // 커서에 붙은 앞쪽 문자(바이트)의 시작 찾기.
-    let start = (0..*cursor).rev().find(|&i| input.is_char_boundary(i)).unwrap_or(0);
+    let start = (0..*cursor)
+        .rev()
+        .find(|&i| input.is_char_boundary(i))
+        .unwrap_or(0);
     input.replace_range(start..*cursor, "");
     *cursor = start;
 }
@@ -917,11 +926,7 @@ fn move_cursor_word(input: &str, cursor: &mut usize, forward: bool) -> bool {
         // 뒤에서 공백을 건너뛴 뒤 마지막 문자 확인.
         let mut i = (*cursor).min(n);
         while i > 0 {
-            let (j, ch) = input
-                .char_indices()
-                .rev()
-                .find(|(j, _)| *j < i)
-                .unwrap();
+            let (j, ch) = input.char_indices().rev().find(|(j, _)| *j < i).unwrap();
             if ch == ' ' || ch == '\t' {
                 i = j;
                 continue;
@@ -931,11 +936,7 @@ fn move_cursor_word(input: &str, cursor: &mut usize, forward: bool) -> bool {
             if is_word_char(ch) {
                 let mut k = j;
                 while k > 0 {
-                    let (m, c) = input
-                        .char_indices()
-                        .rev()
-                        .find(|(m, _)| *m < k)
-                        .unwrap();
+                    let (m, c) = input.char_indices().rev().find(|(m, _)| *m < k).unwrap();
                     if is_word_char(c) {
                         k = m;
                     } else {
@@ -1099,7 +1100,9 @@ fn draw_scroll(
             Role::Status => "· ",
         };
         let style = match line.role {
-            Role::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Role::User => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             Role::Assistant => Style::default().fg(Color::Cyan),
             Role::Tool => Style::default().fg(Color::Yellow),
             Role::Status => Style::default().fg(Color::DarkGray),
@@ -1221,14 +1224,14 @@ fn render_thinking(line: &ChatLine, is_running: bool) -> Vec<Line<'static>> {
         .add_modifier(Modifier::BOLD);
     let hint_style = Style::default().fg(Color::DarkGray);
     let header = if is_running {
-        format!("💭 생각 중… ({n}자)")
+        crate::i18n::tr_fmt("💭 thinking… ({} chars)", &[&n.to_string()])
     } else {
-        format!("💭 생각 ({n}자)")
+        crate::i18n::tr_fmt("💭 thinking ({} chars)", &[&n.to_string()])
     };
     let hint = if line.reasoning_expanded {
-        "  — Ctrl+T 접기"
+        crate::i18n::tr("  — Ctrl+T collapse")
     } else {
-        "  — Ctrl+T 펼치기"
+        crate::i18n::tr("  — Ctrl+T expand")
     };
     let mut out: Vec<Line<'static>> = vec![Line::from(vec![
         Span::styled(header, header_style),
@@ -1299,10 +1302,10 @@ fn turn_phase(lines: &[ChatLine]) -> &'static str {
         .iter()
         .any(|l| l.role == Role::Tool && l.text.ends_with(" …"));
     match lines.iter().rev().find(|l| l.role == Role::Assistant) {
-        Some(l) if !l.text.trim().is_empty() => "응답 생성 중",
-        _ if tool_running => "도구 실행 중",
-        Some(l) if !l.reasoning_content.trim().is_empty() => "생각 중",
-        _ => "대기 중",
+        Some(l) if !l.text.trim().is_empty() => crate::i18n::tr("Generating response"),
+        _ if tool_running => crate::i18n::tr("Running tools"),
+        Some(l) if !l.reasoning_content.trim().is_empty() => crate::i18n::tr("Thinking"),
+        _ => crate::i18n::tr("Waiting"),
     }
 }
 
@@ -1360,7 +1363,9 @@ fn push_tool_event(lines: &mut Vec<ChatLine>, ev: crate::llm::ToolEvent) {
 /// 입력에 줄바꿈이 있으면 여러 줄로 렌더하고, 커서가 속한 줄이 보이도록
 /// 세로 스크롤한다.
 fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
-    let title = "입력 (Enter 전송 · Shift+Enter 줄바꿈 · ↑↓ 히스토리 · Tab 자동완성 · Ctrl+T 생각 · Ctrl+Q 종료)";
+    let title = crate::i18n::tr(
+        "Input (Enter send · Shift+Enter newline · ↑↓ history · Tab complete · Ctrl+T thinking · Ctrl+Q quit)",
+    );
     // 커서 표시: [cursor 앞][커서 셀(블록)][cursor 뒤]. 커서가 줄 끝이거나
     // 입력이 비어 있으면 문자 스팬이 비어 보이지 않으므로 공백 셀을 그린다.
     let cursor_style = Style::default()
@@ -1476,10 +1481,9 @@ fn draw_completions(
     let area = Rect::new(input_area.x, y, input_area.width, height);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![Span::styled(
-        format!(
-            "커맨드 자동완성 {}/{} (Enter 선택 · Tab/↑↓ 이동 · Esc 취소)",
-            idx.min(total - 1) + 1,
-            total
+        crate::i18n::tr_fmt(
+            "Command completion {}/{} (Enter select · Tab/↑↓ move · Esc cancel)",
+            &[&(idx.min(total - 1) + 1).to_string(), &total.to_string()],
         ),
         Style::default()
             .fg(Color::Cyan)
@@ -1541,21 +1545,19 @@ fn draw_status(
     progress: Option<(&str, &str, u64)>,
 ) {
     let mut status = if saved {
-        format!("세션 저장됨 — {session_id}")
+        crate::i18n::tr_fmt("Session saved — {id}", &[session_id])
     } else {
-        format!("세션 id: {session_id}")
+        crate::i18n::tr_fmt("Session id: {id}", &[session_id])
     };
-    status.push_str(&format!("  세션 ↑{total_in} ↓{total_out}"));
+    status.push_str(&crate::i18n::tr_fmt(
+        "  Session ↑{} ↓{}",
+        &[&total_in.to_string(), &total_out.to_string()],
+    ));
     // 진행 중 턴이면 스피너 + 페이즈 + 경과 시간을 표시한다.
     if let Some((frame, phase, elapsed_ms)) = progress {
         status.insert_str(
             0,
-            &format!(
-                "{} {} ({})  ",
-                frame,
-                phase,
-                format_elapsed(elapsed_ms)
-            ),
+            &format!("{} {} ({})  ", frame, phase, format_elapsed(elapsed_ms)),
         );
     }
     if let Some(l) = last {
@@ -1614,41 +1616,41 @@ mod tests {
     fn turn_phase_transitions() {
         // 빈 줄: 대기 중.
         let mut lines: Vec<ChatLine> = Vec::new();
-        assert_eq!(turn_phase(&lines), "대기 중");
+        assert_eq!(turn_phase(&lines), "Waiting");
         // 빈 Assistant 줄 추가: 여전히 대기 중 (첫 토큰 도착 전).
         lines.push(ChatLine {
             role: Role::Assistant,
             ..ChatLine::default()
         });
-        assert_eq!(turn_phase(&lines), "대기 중");
+        assert_eq!(turn_phase(&lines), "Waiting");
         // reasoning 만 쌓이면 생각 중.
         lines.push(ChatLine {
             role: Role::Assistant,
             reasoning_content: "생각".to_string(),
             ..ChatLine::default()
         });
-        assert_eq!(turn_phase(&lines), "생각 중");
+        assert_eq!(turn_phase(&lines), "Thinking");
         // "호출 중" 도구 줄이 있으면 도구 실행 중.
         lines.push(ChatLine {
             role: Role::Tool,
             text: "read_file (foo.rs) …".to_string(),
             ..ChatLine::default()
         });
-        assert_eq!(turn_phase(&lines), "도구 실행 중");
+        assert_eq!(turn_phase(&lines), "Running tools");
         // 본문이 쌓이면 응답 생성 중.
         lines.push(ChatLine {
             role: Role::Assistant,
             text: "안녕하세요".to_string(),
             ..ChatLine::default()
         });
-        assert_eq!(turn_phase(&lines), "응답 생성 중");
+        assert_eq!(turn_phase(&lines), "Generating response");
         // 완료된 도구 줄(꼬리 ` …` 없음)은 "도구 실행 중"으로 오인하지 않는다.
         lines.push(ChatLine {
             role: Role::Assistant,
             text: "결과".to_string(),
             ..ChatLine::default()
         });
-        assert_eq!(turn_phase(&lines), "응답 생성 중");
+        assert_eq!(turn_phase(&lines), "Generating response");
     }
 
     /// step_history: ↑ 로 거슬러 올라가고 ↓ 로 최신 방향으로 내려간다.
@@ -1872,20 +1874,25 @@ mod tests {
             model: "model".to_string(),
             session_id: "sid".to_string(),
         };
-        let result = run_tui(&options, vec![], |_msg, _tx| {
-            Ok(TurnResult {
-                exit_code: 0,
-                assistant_content: "ok".to_string(),
-                reasoning_content: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                duration_ms: 0,
-                files_touched: vec![],
-            })
-        }, |_cmd| CommandResult {
-            message: String::new(),
-            exit: false,
-        })
+        let result = run_tui(
+            &options,
+            vec![],
+            |_msg, _tx| {
+                Ok(TurnResult {
+                    exit_code: 0,
+                    assistant_content: "ok".to_string(),
+                    reasoning_content: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: 0,
+                    files_touched: vec![],
+                })
+            },
+            |_cmd| CommandResult {
+                message: String::new(),
+                exit: false,
+            },
+        )
         .unwrap();
         assert!(result.is_none());
     }
@@ -2032,7 +2039,11 @@ mod tests {
 
         let mut second = Vec::new();
         assert!(cache.append_wrapped(&mut second, &rendered, 10, 1, false));
-        assert_eq!(cache.wrap_misses(), 1, "캐시 히트에 미스 카운터는 증가하지 않아야 한다");
+        assert_eq!(
+            cache.wrap_misses(),
+            1,
+            "캐시 히트에 미스 카운터는 증가하지 않아야 한다"
+        );
         assert_eq!(first, second);
     }
 
@@ -2050,7 +2061,11 @@ mod tests {
         let streamed = test_rendered(&["안녕하세요 세계", "다음 줄"]);
         let mut out2 = Vec::new();
         assert!(!cache.append_wrapped(&mut out2, &streamed, 10, 2, false));
-        assert_eq!(cache.wrap_misses(), 2, "스트리밍 재렌더는 미스 1회만 증가해야 한다");
+        assert_eq!(
+            cache.wrap_misses(),
+            2,
+            "스트리밍 재렌더는 미스 1회만 증가해야 한다"
+        );
 
         // 완전 재래핑(캐시 없는 상태) 결과와 동일해야 한다.
         let mut fresh = Vec::new();
@@ -2081,9 +2096,11 @@ mod tests {
 
         // 첫 렌더: main·reasoning 각각 미스.
         let mut out = Vec::new();
-        assert!(!line
-            .render_cache
-            .append_wrapped(&mut out, &main, 10, line.generation, false));
+        assert!(
+            !line
+                .render_cache
+                .append_wrapped(&mut out, &main, 10, line.generation, false)
+        );
         assert!(!line.reasoning_cache.append_wrapped(
             &mut out,
             &reasoning,
@@ -2096,9 +2113,10 @@ mod tests {
 
         // 재렌더: 두 캐시 모두 히트 (미스 증가 0).
         let mut out2 = Vec::new();
-        assert!(line
-            .render_cache
-            .append_wrapped(&mut out2, &main, 10, line.generation, false));
+        assert!(
+            line.render_cache
+                .append_wrapped(&mut out2, &main, 10, line.generation, false)
+        );
         assert!(line.reasoning_cache.append_wrapped(
             &mut out2,
             &reasoning,
@@ -2184,8 +2202,8 @@ mod tests {
         let out = render_thinking(&thinking_line(false), false);
         assert_eq!(out.len(), 1);
         let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("💭 생각"), "{text:?}");
-        assert!(text.contains("Ctrl+T 펼치기"), "{text:?}");
+        assert!(text.contains("💭 thinking"), "{text:?}");
+        assert!(text.contains("Ctrl+T expand"), "{text:?}");
         assert!(!text.contains("생각한 내용"), "{text:?}");
     }
 
@@ -2204,15 +2222,15 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(all.contains("— Ctrl+T 접기"), "{all:?}");
+        assert!(all.contains("— Ctrl+T collapse"), "{all:?}");
         assert!(all.contains("생각한 내용"), "{all:?}");
     }
 
-    /// 진행 중이면 헤더가 "생각 중…" 으로 바뀐다.
+    /// 진행 중이면 헤더가 "thinking…" 으로 바뀐다.
     #[test]
     fn running_thinking_header() {
         let out = render_thinking(&thinking_line(false), true);
         let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("생각 중…"), "{text:?}");
+        assert!(text.contains("thinking…"), "{text:?}");
     }
 }

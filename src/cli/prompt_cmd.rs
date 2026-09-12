@@ -21,7 +21,10 @@ pub fn run(args: PromptArgs, cfg: &Config) -> Result<i32, Box<dyn std::error::Er
         .iter()
         .map(|(name, m)| crate::prompt::McpIndex {
             name: name.clone(),
-            description: m.description.clone().unwrap_or_else(|| "(설명 없음)".to_string()),
+            description: m
+                .description
+                .clone()
+                .unwrap_or_else(|| crate::i18n::tr("(no description)").to_string()),
         })
         .collect();
     let ctx = prompt::context_from_config(cfg, cwd, project_root, skills, mcp_servers)?;
@@ -34,7 +37,7 @@ pub fn run(args: PromptArgs, cfg: &Config) -> Result<i32, Box<dyn std::error::Er
         }
         PromptCommand::Edit => {
             prompt::edit(&ctx)?;
-            println!("글로벌 프롬프트 편집 완료");
+            println!("{}", crate::i18n::tr("Global prompt edited."));
             Ok(0)
         }
     }

@@ -20,8 +20,8 @@ use crate::skills::SkillIndex;
 /// 빌트인 베이스 (include_str! 로 포함, 저장소에서 버전 관리).
 const BASE_MD: &str = include_str!("base.md");
 
-/// 인덱스 섹션 헤더.
-const INDEX_HEADER: &str = "## 레이지 로딩 인덱스 (스킬·MCP·history)";
+/// 인덱스 섹션 헤더 (i18n 키 = 영어 원문).
+const INDEX_HEADER: &str = "## Lazy-loading index (skills · MCP · history)";
 
 /// 프로젝트 시스템 프롬프트 파일 이름.
 pub const PROJECT_PROMPT_FILENAME: &str = ".bulti/system.md";
@@ -90,14 +90,16 @@ pub fn render_template(text: &str, values: &TemplateValues) -> String {
 /// 인덱스 섹션을 조립한다. 스킬·MCP·history 안내를 포함한다.
 pub fn build_index(ctx: &PromptContext) -> String {
     let mut out = String::new();
-    out.push_str(INDEX_HEADER);
+    out.push_str(crate::i18n::tr(INDEX_HEADER));
     out.push('\n');
 
     // 스킬 인덱스.
     if ctx.skills.is_empty() {
-        out.push_str("- 스킬: 없음\n");
+        out.push_str(crate::i18n::tr("- Skills: none\n"));
     } else {
-        out.push_str("- 스킬 (필요할 때 `skill_load(name)` 로 로드):\n");
+        out.push_str(crate::i18n::tr(
+            "- Skills (load on demand with `skill_load(name)`):\n",
+        ));
         for s in &ctx.skills {
             out.push_str(&format!("  - {} — {}\n", s.name, s.description));
         }
@@ -105,18 +107,20 @@ pub fn build_index(ctx: &PromptContext) -> String {
 
     // MCP 인덱스.
     if ctx.mcp_servers.is_empty() {
-        out.push_str("- MCP 서버: 없음\n");
+        out.push_str(crate::i18n::tr("- MCP servers: none\n"));
     } else {
-        out.push_str("- MCP 서버 (필요할 때 `mcp_tools(server)` 로 로드):\n");
+        out.push_str(crate::i18n::tr(
+            "- MCP servers (load on demand with `mcp_tools(server)`):\n",
+        ));
         for m in &ctx.mcp_servers {
             out.push_str(&format!("  - {} — {}\n", m.name, m.description));
         }
     }
 
     // history 안내.
-    out.push_str(
-        "- history (이전 작업 맥락 회수): `history_list(query?, limit?)`, `history_read(run_id)`\n",
-    );
+    out.push_str(crate::i18n::tr(
+        "- history (recall past task context): `history_list(query?, limit?)`, `history_read(run_id)`\n",
+    ));
 
     out
 }
@@ -176,8 +180,9 @@ pub fn assemble(ctx: &PromptContext, overrides: Option<Override>) -> Result<Stri
     // 변수 치환 (모든 계층, 교체 본문에도 적용).
     let rendered = render_template(&body, &values);
 
-    // 인덱스 섹션을 본문 뒤에 붙인다.
-    Ok(format!("{rendered}\n\n{index}"))
+    // 선택된 언어로 응답하도록 지시하고, 인덱스 섹션을 본문 뒤에 붙인다.
+    let response_lang = crate::i18n::current().response_instruction();
+    Ok(format!("{rendered}\n\n{response_lang}\n\n{index}"))
 }
 
 /// 템플릿 변수 값을 계산한다.
@@ -261,10 +266,11 @@ pub fn context_from_config(
     skills: Vec<SkillIndex>,
     mcp_servers: Vec<McpIndex>,
 ) -> Result<PromptContext, PromptError> {
-    let global_dir = Config::config_dir().map_err(|e| PromptError::HomeDirNotFound(e.to_string()))?;
+    let global_dir =
+        Config::config_dir().map_err(|e| PromptError::HomeDirNotFound(e.to_string()))?;
     let (endpoint, endpoint_config) = match cfg.active_endpoint_config() {
         Some((name, ep)) => (name.to_string(), Some(ep.clone())),
-        None => ("(없음)".to_string(), None),
+        None => (crate::i18n::tr("(none)").to_string(), None),
     };
     Ok(PromptContext {
         cwd,
@@ -360,8 +366,8 @@ mod tests {
         ctx.skills.clear();
         ctx.mcp_servers.clear();
         let index = build_index(&ctx);
-        assert!(index.contains("스킬: 없음"));
-        assert!(index.contains("MCP 서버: 없음"));
+        assert!(index.contains("Skills: none"));
+        assert!(index.contains("MCP servers: none"));
         assert!(index.contains("history_list"));
     }
 
@@ -438,7 +444,11 @@ mod tests {
         std::fs::write(project_prompt_path(&root), "프로젝트 지시").unwrap();
 
         let ctx = test_ctx(&root, &global_dir);
-        let out = assemble(&ctx, Some(Override::Inline("완전 교체 {{cwd}}".to_string()))).unwrap();
+        let out = assemble(
+            &ctx,
+            Some(Override::Inline("완전 교체 {{cwd}}".to_string())),
+        )
+        .unwrap();
 
         // 빌트인·글로벌·프로젝트 무시.
         assert!(!out.contains("불티(Bulti)"));
@@ -498,9 +508,15 @@ mod tests {
     fn context_from_config_no_endpoint() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::new();
-        let ctx = context_from_config(&cfg, dir.path().to_path_buf(), dir.path().to_path_buf(), vec![], vec![])
-            .unwrap();
-        assert_eq!(ctx.endpoint, "(없음)");
+        let ctx = context_from_config(
+            &cfg,
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(ctx.endpoint, "(none)");
         assert!(ctx.endpoint_config.is_none());
     }
 

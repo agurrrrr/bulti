@@ -8,14 +8,9 @@ pub fn run(args: HistoryArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let conn = history::open()?;
     match args.command {
         HistoryCommand::List(a) => {
-            let rows = history::list_runs(
-                &conn,
-                a.n,
-                a.status.as_deref(),
-                a.chain.as_deref(),
-            )?;
+            let rows = history::list_runs(&conn, a.n, a.status.as_deref(), a.chain.as_deref())?;
             if rows.is_empty() {
-                println!("기록된 작업이 없습니다.");
+                println!("{}", crate::i18n::tr("No recorded tasks."));
                 return Ok(0);
             }
             for r in &rows {
@@ -27,7 +22,7 @@ pub fn run(args: HistoryArgs) -> Result<i32, Box<dyn std::error::Error>> {
                     format!(" [seg {}]", r.segment_index)
                 };
                 println!(
-                    "#{:<4} {:<11} {}{} | {} | {} | {} 파일 | {}ms",
+                    "#{:<4} {:<11} {}{} | {} | {} | {} {} | {}ms",
                     r.id,
                     r.status,
                     &r.started_at[..19],
@@ -35,6 +30,7 @@ pub fn run(args: HistoryArgs) -> Result<i32, Box<dyn std::error::Error>> {
                     r.endpoint,
                     model,
                     files,
+                    crate::i18n::tr("files"),
                     r.duration_ms.map(|d| d.to_string()).unwrap_or("-".into()),
                 );
             }
@@ -44,45 +40,97 @@ pub fn run(args: HistoryArgs) -> Result<i32, Box<dyn std::error::Error>> {
             let n: i64 = id
                 .trim()
                 .parse()
-                .map_err(|_| format!("id 는 숫자여야 합니다: {id}"))?;
+                .map_err(|_| crate::i18n::tr_fmt("id must be a number: {id}", &[id.trim()]))?;
             match history::get_run(&conn, n)? {
                 Some(r) => {
-                    println!("작업 #{}\n", r.id);
-                    println!("  상태:        {}", r.status);
-                    println!("  시작:        {}", r.started_at);
                     println!(
-                        "  종료:        {}",
-                        r.finished_at.as_deref().unwrap_or("-")
+                        "{}",
+                        crate::i18n::tr_fmt("Task #{id}\n", &[&r.id.to_string()])
                     );
-                    println!("  cwd:         {}", r.cwd);
-                    println!("  endpoint:    {}", r.endpoint);
-                    println!("  model:       {}", r.model.as_deref().unwrap_or("-"));
-                    println!("  chain_id:    {}", r.chain_id);
-                    println!("  segment:     {}", r.segment_index);
-                    println!("  depth:       {}", r.handoff_depth);
+                    println!("{}", crate::i18n::tr_fmt("  status:      {}", &[&r.status]));
                     println!(
-                        "  parent_run:  {}",
-                        r.parent_run_id.map(|p| p.to_string()).unwrap_or("-".into())
+                        "{}",
+                        crate::i18n::tr_fmt("  started:     {}", &[&r.started_at])
                     );
                     println!(
-                        "  tokens:      {}/{}",
-                        r.input_tokens.map(|t| t.to_string()).unwrap_or("-".into()),
-                        r.output_tokens.map(|t| t.to_string()).unwrap_or("-".into())
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  finished:    {}",
+                            &[r.finished_at.as_deref().unwrap_or("-")]
+                        )
+                    );
+                    println!("{}", crate::i18n::tr_fmt("  cwd:         {}", &[&r.cwd]));
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  endpoint:    {}", &[&r.endpoint])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  model:       {}",
+                            &[r.model.as_deref().unwrap_or("-")]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  chain_id:    {}", &[&r.chain_id])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  segment:     {}", &[&r.segment_index.to_string()])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  depth:       {}", &[&r.handoff_depth.to_string()])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  parent_run:  {}",
+                            &[&r.parent_run_id
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "-".into())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  tokens:      {}/{}",
+                            &[
+                                &r.input_tokens
+                                    .map(|t| t.to_string())
+                                    .unwrap_or_else(|| "-".into()),
+                                &r.output_tokens
+                                    .map(|t| t.to_string())
+                                    .unwrap_or_else(|| "-".into()),
+                            ]
+                        )
                     );
                     let files = history::parse_files_touched(r.files_touched.as_deref());
-                    println!("  files:       {}", files.join(", "));
                     println!(
-                        "  duration:    {}ms",
-                        r.duration_ms.map(|d| d.to_string()).unwrap_or("-".into())
+                        "{}",
+                        crate::i18n::tr_fmt("  files:       {}", &[&files.join(", ")])
                     );
-                    println!("\n  프롬프트:\n{}", r.prompt);
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  duration:    {}ms",
+                            &[&r.duration_ms
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "-".into())]
+                        )
+                    );
+                    println!("{}", crate::i18n::tr_fmt("\n  prompt:\n{}", &[&r.prompt]));
                     if let Some(res) = &r.result {
-                        println!("\n  결과:\n{res}");
+                        println!("{}", crate::i18n::tr_fmt("\n  result:\n{res}", &[res]));
                     }
                     Ok(0)
                 }
                 None => {
-                    println!("작업 #{n} 을 찾을 수 없습니다.");
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("Task #{id} not found.", &[&n.to_string()])
+                    );
                     Ok(1)
                 }
             }
@@ -100,19 +148,43 @@ pub fn run(args: HistoryArgs) -> Result<i32, Box<dyn std::error::Error>> {
             };
             match rows.first() {
                 Some(r) => {
-                    println!("마지막 작업: #{}\n", r.id);
-                    println!("  상태:      {}", r.status);
-                    println!("  시작:      {}", r.started_at);
-                    println!("  chain_id:  {}", r.chain_id);
-                    println!("  endpoint:  {}", r.endpoint);
-                    println!("  model:     {}", r.model.as_deref().unwrap_or("-"));
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("Last task: #{id}\n", &[&r.id.to_string()])
+                    );
+                    println!("{}", crate::i18n::tr_fmt("  status:      {}", &[&r.status]));
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  started:     {}", &[&r.started_at])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  chain_id:    {}", &[&r.chain_id])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt("  endpoint:    {}", &[&r.endpoint])
+                    );
+                    println!(
+                        "{}",
+                        crate::i18n::tr_fmt(
+                            "  model:       {}",
+                            &[r.model.as_deref().unwrap_or("-")]
+                        )
+                    );
                     if let Some(res) = &r.result {
-                        println!("\n  결과:\n{}", &res[..res.len().min(500)]);
+                        println!(
+                            "{}",
+                            crate::i18n::tr_fmt(
+                                "\n  result:\n{res}",
+                                &[&res[..res.len().min(500)]]
+                            )
+                        );
                     }
                     Ok(0)
                 }
                 None => {
-                    println!("기록된 작업이 없습니다.");
+                    println!("{}", crate::i18n::tr("No recorded tasks."));
                     Ok(1)
                 }
             }

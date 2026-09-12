@@ -16,7 +16,10 @@ pub fn run(args: ConfigArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error
                     Ok(0)
                 }
                 None => {
-                    tracing::warn!("설정 키를 찾을 수 없습니다: {}", key);
+                    tracing::warn!(
+                        "{}",
+                        crate::i18n::tr_fmt("Config key not found: {key}", &[&key])
+                    );
                     Ok(1)
                 }
             }
@@ -39,6 +42,7 @@ fn get_value(cfg: &Config, key: &str) -> Option<String> {
     match key {
         "version" => Some(cfg.version.to_string()),
         "active_endpoint" => cfg.active_endpoint.clone(),
+        "language" => Some(cfg.language.code().to_string()),
         "handoff_threshold_pct" => Some(cfg.context.handoff_threshold_pct.to_string()),
         "max_handoff_depth" => Some(cfg.context.max_handoff_depth.to_string()),
         "handoff_warn_depth" => Some(cfg.context.handoff_warn_depth.to_string()),
@@ -89,6 +93,11 @@ fn mcp_field(m: &crate::config::McpConfig, field: &str) -> Option<String> {
 fn set_value(cfg: &mut Config, key: &str, value: &str) {
     match key {
         "active_endpoint" => cfg.active_endpoint = Some(value.to_string()),
+        "language" => {
+            if let Some(lang) = crate::i18n::Language::from_code(value) {
+                cfg.language = lang;
+            }
+        }
         "handoff_threshold_pct" => {
             if let Ok(v) = value.parse::<u8>() {
                 cfg.context.handoff_threshold_pct = v;
@@ -129,7 +138,10 @@ fn set_value(cfg: &mut Config, key: &str, value: &str) {
             u.mode = mode;
         }
         _ => {
-            tracing::warn!("설정 키 수정 미지원: {}", key);
+            tracing::warn!(
+                "{}",
+                crate::i18n::tr_fmt("Unsupported config key for set: {key}", &[key])
+            );
         }
     }
 }
@@ -138,6 +150,7 @@ fn set_value(cfg: &mut Config, key: &str, value: &str) {
 fn list(cfg: &Config) {
     let mut keys: BTreeMap<String, String> = BTreeMap::new();
     keys.insert("version".to_string(), cfg.version.to_string());
+    keys.insert("language".to_string(), cfg.language.code().to_string());
     if let Some(ae) = &cfg.active_endpoint {
         keys.insert("active_endpoint".to_string(), ae.clone());
     }

@@ -16,7 +16,7 @@ pub fn run(args: SkillArgs) -> Result<i32, Box<dyn std::error::Error>> {
         SkillCommand::List => {
             let indices = skills::discover(&cwd, &global_dir)?;
             if indices.is_empty() {
-                println!("(스킬 없음)");
+                println!("{}", crate::i18n::tr("(no skills)"));
             } else {
                 for s in &indices {
                     println!("{} — {}", s.name, s.description);

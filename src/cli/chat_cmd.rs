@@ -15,13 +15,13 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::ChatArgs;
-use crate::agent::handoff::{build_new_segment_prompt, HandoffDepthGuard};
-use crate::agent::loop_::{run_segment, SegmentParams, SegmentStatus};
+use crate::agent::handoff::{HandoffDepthGuard, build_new_segment_prompt};
+use crate::agent::loop_::{SegmentParams, SegmentStatus, run_segment};
 use crate::config::{Config, EndpointConfig, McpConfig};
 use crate::history;
 use crate::llm::LlmClient;
@@ -135,7 +135,10 @@ impl StreamPrinter {
             return false;
         }
         let rendered = self.render();
-        let mut rest = rendered.strip_prefix(&self.printed).unwrap_or(&rendered).to_string();
+        let mut rest = rendered
+            .strip_prefix(&self.printed)
+            .unwrap_or(&rendered)
+            .to_string();
         if !rest.ends_with('\n') {
             rest.push('\n');
         }
@@ -201,7 +204,11 @@ impl StreamPrinter {
         if !self.content.trim().is_empty() {
             let blocks = crate::render::parse(&self.content);
             let body = crate::render::render_ansi(&blocks);
-            let body = if self.use_color { body } else { strip_ansi(&body) };
+            let body = if self.use_color {
+                body
+            } else {
+                strip_ansi(&body)
+            };
             out.push_str(&body);
         }
         out
@@ -216,56 +223,78 @@ fn ensure_endpoint_interactive(
     use std::io::IsTerminal;
 
     if !std::io::stdin().is_terminal() {
-        tracing::error!("엔드포인트가 설정되지 않았습니다 (bulti endpoint add 로 먼저 등록하세요)");
+        tracing::error!(
+            "{}",
+            crate::i18n::tr(
+                "Endpoint is not configured (register one first with `bulti endpoint add`)"
+            )
+        );
         return Ok(None);
     }
 
-    println!("⚠️  등록된 엔드포인트가 없습니다. 대화를 시작하기 전에 엔드포인트를 설정해 주세요.");
-    println!("    이미 등록된 엔드포인트가 있으면 `bulti endpoint list` 로 확인하고 `bulti endpoint use <이름>` 으로 활성화할 수 있습니다.\n");
+    println!(
+        "{}",
+        crate::i18n::tr(
+            "⚠️  No endpoint is registered. Please configure an endpoint before starting."
+        )
+    );
+    println!(
+        "{}",
+        crate::i18n::tr(
+            "    If you already have one, check with `bulti endpoint list` and activate it with `bulti endpoint use <name>`."
+        )
+    );
+    println!();
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
 
     // 이름 입력.
-    print!("엔드포인트 이름 (기본: main): ");
+    print!("{}", crate::i18n::tr("Endpoint name (default: main): "));
     std::io::stdout().flush().ok();
     let name = match lines.next() {
         Some(Ok(n)) if !n.trim().is_empty() => n.trim().to_string(),
         Some(Ok(_)) => "main".to_string(),
         Some(Err(e)) => {
-            tracing::error!("입력 오류: {e}");
+            tracing::error!(
+                "{}",
+                crate::i18n::tr_fmt("Input error: {e}", &[&e.to_string()])
+            );
             return Ok(None);
         }
         None => {
-            tracing::info!("EOF — 설정 중단");
+            tracing::info!("{}", crate::i18n::tr("EOF — configuration aborted"));
             return Ok(None);
         }
     };
 
     // URL 입력.
-    print!("엔드포인트 URL (예: http://127.0.0.1:8084/v1): ");
+    print!(
+        "{}",
+        crate::i18n::tr("Endpoint URL (e.g. http://127.0.0.1:8084/v1): ")
+    );
     std::io::stdout().flush().ok();
     let url = match lines.next() {
         Some(Ok(u)) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
-            tracing::error!("URL 은 필수입니다");
+            tracing::error!("{}", crate::i18n::tr("URL is required"));
             return Ok(None);
         }
     };
 
     // 모델 입력.
-    print!("모델 이름: ");
+    print!("{}", crate::i18n::tr("Model name: "));
     std::io::stdout().flush().ok();
     let model = match lines.next() {
         Some(Ok(m)) if !m.trim().is_empty() => m.trim().to_string(),
         _ => {
-            tracing::error!("모델 이름은 필수입니다");
+            tracing::error!("{}", crate::i18n::tr("Model name is required"));
             return Ok(None);
         }
     };
 
     // API 키 입력 (선택).
-    print!("API 키 (선택, 없으면 Enter): ");
+    print!("{}", crate::i18n::tr("API key (optional, Enter to skip): "));
     std::io::stdout().flush().ok();
     let api_key = match lines.next() {
         Some(Ok(k)) if !k.trim().is_empty() => Some(k.trim().to_string()),
@@ -291,7 +320,10 @@ fn ensure_endpoint_interactive(
         cfg.active_endpoint = Some(name.clone());
     }
     cfg.save()?;
-    println!("엔드포인트 '{name}' 을(를) 등록하고 활성화했습니다.\n");
+    println!(
+        "{}",
+        crate::i18n::tr_fmt("Registered and activated endpoint '{name}'.\n", &[&name])
+    );
     Ok(Some((name, ep)))
 }
 
@@ -329,23 +361,22 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     }
 
     // 시스템 프롬프트 오버라이드 + 조립 (run 과 동일 공통 로직).
-    let override_opt = crate::cli::prompt_cmd::override_from_run_args(&args.system_file, &args.system);
+    let override_opt =
+        crate::cli::prompt_cmd::override_from_run_args(&args.system_file, &args.system);
     let skills = crate::skills::discover(&project_root, &global_dir)?;
     let mcp_servers = cfg
         .mcp
         .iter()
         .map(|(name, m)| crate::prompt::McpIndex {
             name: name.clone(),
-            description: m.description.clone().unwrap_or_else(|| "(설명 없음)".to_string()),
+            description: m
+                .description
+                .clone()
+                .unwrap_or_else(|| crate::i18n::tr("(no description)").to_string()),
         })
         .collect();
-    let ctx = crate::prompt::context_from_config(
-        cfg,
-        cwd.clone(),
-        project_root,
-        skills,
-        mcp_servers,
-    )?;
+    let ctx =
+        crate::prompt::context_from_config(cfg, cwd.clone(), project_root, skills, mcp_servers)?;
     let mut system_prompt = crate::prompt::assemble(&ctx, override_opt)?;
 
     // 세션 복원 (`--resume <id>`). 세션의 endpoint/model 을 사용하고
@@ -356,7 +387,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
     if let Some(id) = &args.resume {
         match session::load(id) {
             Ok(s) => {
-                tracing::info!("세션 '{id}' 을(를) 재개합니다");
+                tracing::info!("{}", crate::i18n::tr_fmt("Resuming session '{id}'.", &[id]));
                 session_id = id.clone();
                 // 세션의 endpoint/model 을 사용.
                 if let Some(ep) = cfg.endpoints.get(&s.endpoint) {
@@ -374,7 +405,13 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                 session = s;
             }
             Err(e) => {
-                tracing::error!("세션 '{id}' 복원 실패: {e}");
+                tracing::error!(
+                    "{}",
+                    crate::i18n::tr_fmt(
+                        "Session restore failed for '{id}': {e}",
+                        &[id, &e.to_string()]
+                    )
+                );
                 return Ok(EXIT_ERROR);
             }
         }
@@ -451,71 +488,76 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
         let client_ch = client_tui.clone();
         let rt_ch = rt_tui.clone();
         let session_ch = session_tui.clone();
-        let processor = move |user_msg: String,
-                              delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
-              -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
-            let endpoint_guard = endpoint_tui.lock().unwrap();
-            let cfg_guard = cfg_tui.lock().unwrap();
-            // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
-            let effective_prompt = match resume_tui.lock().unwrap().take() {
-                Some(ctx) if !ctx.trim().is_empty() => {
-                    format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
-                }
-                _ => {
-                    let ctx = {
-                        let s = session_tui.lock().unwrap();
-                        s.conversation_context()
-                    };
-                    if ctx.trim().is_empty() {
-                        user_msg.clone()
-                    } else {
+        let processor =
+            move |user_msg: String,
+                  delta_tx: tokio::sync::mpsc::UnboundedSender<crate::llm::Delta>|
+                  -> Result<TurnResult, Box<dyn std::error::Error + Send + Sync>> {
+                let endpoint_guard = endpoint_tui.lock().unwrap();
+                let cfg_guard = cfg_tui.lock().unwrap();
+                // 재개 컨텍스트 + 같은 세션 이전 턴 대화를 프롬프트에 포함.
+                let effective_prompt = match resume_tui.lock().unwrap().take() {
+                    Some(ctx) if !ctx.trim().is_empty() => {
                         format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
                     }
+                    _ => {
+                        let ctx = {
+                            let s = session_tui.lock().unwrap();
+                            s.conversation_context()
+                        };
+                        if ctx.trim().is_empty() {
+                            user_msg.clone()
+                        } else {
+                            format!("{ctx}[이번 사용자 메시지]\n{user_msg}")
+                        }
+                    }
+                };
+
+                let chain_id = make_uuid();
+                let turn_result = {
+                    let conn_guard = conn_tui.lock().unwrap();
+                    rt_tui
+                        .block_on(run_turn(
+                            &client_tui,
+                            &conn_guard,
+                            &registry_tui,
+                            &system_prompt_owned,
+                            effective_prompt,
+                            &endpoint_guard,
+                            &endpoint_name_owned,
+                            &cfg_guard,
+                            &chain_id,
+                            &session_chain_owned,
+                            session_id_owned.clone(),
+                            turn_count,
+                            interrupted_tui.clone(),
+                            Some(delta_tx),
+                        ))
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            std::io::Error::other(e.to_string()).into()
+                        })?
+                };
+
+                // 턴 종료 시 세션에 기록하고 저장.
+                let mut s = session_tui.lock().unwrap();
+                s.push_turn(session::TurnRecord {
+                    turn: turn_count,
+                    user: user_msg.clone(),
+                    assistant: turn_result.assistant_content.clone(),
+                    chain_id: chain_id.clone(),
+                    files_touched: turn_result.files_touched.clone(),
+                    input_tokens: turn_result.input_tokens,
+                    output_tokens: turn_result.output_tokens,
+                    model: endpoint_guard.model.clone(),
+                });
+                if let Err(e) = session::save(&s) {
+                    tracing::error!(
+                        "{}",
+                        crate::i18n::tr_fmt("Session save failed: {e}", &[&e.to_string()])
+                    );
                 }
+                turn_count += 1;
+                Ok(turn_result)
             };
-
-            let chain_id = make_uuid();
-            let turn_result = {
-                let conn_guard = conn_tui.lock().unwrap();
-                rt_tui.block_on(run_turn(
-                    &client_tui,
-                    &conn_guard,
-                    &registry_tui,
-                    &system_prompt_owned,
-                    effective_prompt,
-                    &endpoint_guard,
-                    &endpoint_name_owned,
-                    &cfg_guard,
-                    &chain_id,
-                    &session_chain_owned,
-                    session_id_owned.clone(),
-                    turn_count,
-                    interrupted_tui.clone(),
-                    Some(delta_tx),
-                ))
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    std::io::Error::other(e.to_string()).into()
-                })?
-            };
-
-            // 턴 종료 시 세션에 기록하고 저장.
-            let mut s = session_tui.lock().unwrap();
-            s.push_turn(session::TurnRecord {
-                turn: turn_count,
-                user: user_msg.clone(),
-                assistant: turn_result.assistant_content.clone(),
-                chain_id: chain_id.clone(),
-                files_touched: turn_result.files_touched.clone(),
-                input_tokens: turn_result.input_tokens,
-                output_tokens: turn_result.output_tokens,
-                model: endpoint_guard.model.clone(),
-            });
-            if let Err(e) = session::save(&s) {
-                tracing::error!("세션 저장 실패: {e}");
-            }
-            turn_count += 1;
-            Ok(turn_result)
-        };
 
         // TUI 슬래시 커맨드 핸들러: `/model`·`/effort`·`/exit` 등.
         // endpoint/cfg 를 Arc<Mutex<>> 로 공유해 모델 변경을 영속화한다.
@@ -529,24 +571,38 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
 
             match cmd_name {
                 "exit" => crate::tui::CommandResult {
-                    message: "대화를 종료합니다.".to_string(),
+                    message: crate::i18n::tr("Conversation ended.").to_string(),
                     exit: true,
                 },
                 "new" => {
                     // 세션 재설정은 chat_loop 의 원본 변수에 반영할 수 없으므로
                     // (TUI 는 별도 스레드), 안내 메시지만 표시한다.
                     crate::tui::CommandResult {
-                        message: "/new 는 TUI 에서 지원하지 않습니다 (종료 후 다시 시작하세요).".to_string(),
+                        message: crate::i18n::tr(
+                            "/new is not supported in the TUI (quit and start again).",
+                        )
+                        .to_string(),
                         exit: false,
                     }
                 }
                 "help" => {
-                    let mut msg = String::from("사용 가능한 커맨드:");
+                    let mut msg = crate::i18n::tr("Available commands:").to_string();
                     for c in crate::slash::COMMANDS {
-                        msg.push_str(&format!("\n  {}  — {}", c.usage, c.description));
+                        msg.push_str(&format!(
+                            "\n  {}  — {}",
+                            crate::i18n::tr(c.usage),
+                            crate::i18n::tr(c.description)
+                        ));
                     }
                     crate::tui::CommandResult {
                         message: msg,
+                        exit: false,
+                    }
+                }
+                "language" => {
+                    let mut cfg_guard = cfg_cmd.lock().unwrap();
+                    crate::tui::CommandResult {
+                        message: set_language_command(&mut cfg_guard, args_str),
                         exit: false,
                     }
                 }
@@ -555,12 +611,16 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     // 단독 입력이면 사용 가능한 세션 목록을 제안한다.
                     let msg = if args_str.is_empty() {
                         format!(
-                            "{}\n(TUI 에서 세션 재개는 지원하지 않습니다 — 종료 후 bulti chat --resume <id> 로 재개하세요.)",
-                            resume_suggest_text()
+                            "{}\n{}",
+                            resume_suggest_text(),
+                            crate::i18n::tr(
+                                "Session resume is not supported in the TUI — quit and resume with bulti chat --resume <id>."
+                            )
                         )
                     } else {
-                        format!(
-                            "TUI 에서 세션 '{args_str}' 재개는 지원하지 않습니다 (종료 후 bulti chat --resume {args_str} 로 재개하세요)."
+                        crate::i18n::tr_fmt(
+                            "Session redirect is not supported in the TUI for '{id}' (quit and resume with bulti chat --resume {id}).",
+                            &[args_str, args_str],
                         )
                     };
                     crate::tui::CommandResult {
@@ -587,17 +647,22 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             match effort {
                                 Some(e) if matches!(e.as_str(), "low" | "medium" | "high") => {
                                     endpoint.reasoning_effort = Some(e.clone());
-                                    msg = format!(
-                                        "모델을 '{model_name}' (으)로, reasoning effort '{e}' (으)로 변경했습니다."
+                                    msg = crate::i18n::tr_fmt(
+                                        "Changed model to '{model}' and reasoning effort to '{effort}'.",
+                                        &[&model_name, &e],
                                     );
                                 }
                                 Some(e) => {
-                                    msg = format!(
-                                        "모델을 '{model_name}' (으)로 변경했습니다. (effort '{e}' 는 무시됨 — low|medium|high)"
+                                    msg = crate::i18n::tr_fmt(
+                                        "Changed model to '{model}'. (effort '{effort}' ignored — low|medium|high)",
+                                        &[&model_name, &e],
                                     );
                                 }
                                 None => {
-                                    msg = format!("모델을 '{model_name}' (으)로 변경했습니다.");
+                                    msg = crate::i18n::tr_fmt(
+                                        "Changed model to '{model}'.",
+                                        &[&model_name],
+                                    );
                                 }
                             }
                         }
@@ -609,7 +674,10 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             ep.reasoning_effort = endpoint.reasoning_effort.clone();
                         }
                         if let Err(e) = cfg_guard.save() {
-                            tracing::error!("설정 저장 실패: {e}");
+                            tracing::error!(
+                                "{}",
+                                crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+                            );
                         }
                         crate::tui::CommandResult {
                             message: msg,
@@ -621,7 +689,8 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     let e = args_str.trim().to_lowercase();
                     if !matches!(e.as_str(), "low" | "medium" | "high") {
                         crate::tui::CommandResult {
-                            message: "사용법: /effort <low|medium|high>".to_string(),
+                            message: crate::i18n::tr("Usage: /effort <low|medium|high>")
+                                .to_string(),
                             exit: false,
                         }
                     } else {
@@ -635,10 +704,16 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             ep.reasoning_effort = endpoint.reasoning_effort.clone();
                         }
                         if let Err(e) = cfg_guard.save() {
-                            tracing::error!("설정 저장 실패: {e}");
+                            tracing::error!(
+                                "{}",
+                                crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+                            );
                         }
                         crate::tui::CommandResult {
-                            message: format!("reasoning effort 를 '{e}' (으)로 설정했습니다."),
+                            message: crate::i18n::tr_fmt(
+                                "Set reasoning effort to '{effort}'.",
+                                &[&e],
+                            ),
                             exit: false,
                         }
                     }
@@ -680,7 +755,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         let s = session_ch.lock().unwrap();
                         match fork_session(&s) {
                             Ok(m) => m,
-                            Err(e) => format!("세션 분기 실패: {e}"),
+                            Err(e) => crate::i18n::tr_fmt("Session fork failed: {e}", &[&e]),
                         }
                     };
                     crate::tui::CommandResult {
@@ -693,7 +768,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         let s = session_ch.lock().unwrap();
                         match export_session(&s, args_str) {
                             Ok(m) => m,
-                            Err(e) => format!("내보내기 실패: {e}"),
+                            Err(e) => crate::i18n::tr_fmt("Export failed: {e}", &[&e]),
                         }
                     };
                     crate::tui::CommandResult {
@@ -708,7 +783,7 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     };
                     if !has_turns {
                         crate::tui::CommandResult {
-                            message: "컴팩트할 대화가 없습니다. (턴 0개)".to_string(),
+                            message: crate::i18n::tr("Nothing to compact. (0 turns)").to_string(),
                             exit: false,
                         }
                     } else {
@@ -727,24 +802,42 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                                 apply_compact(&mut sess, sum);
                                 match session::save(&sess) {
                                     Ok(_) => crate::tui::CommandResult {
-                                        message: "대화 기록을 요약으로 압축했습니다.".to_string(),
+                                        message: crate::i18n::tr(
+                                            "Compacted the conversation into a summary.",
+                                        )
+                                        .to_string(),
                                         exit: false,
                                     },
                                     Err(e) => {
-                                        tracing::error!("세션 저장 실패: {e}");
+                                        tracing::error!(
+                                            "{}",
+                                            crate::i18n::tr_fmt(
+                                                "Session save failed: {e}",
+                                                &[&e.to_string()]
+                                            )
+                                        );
                                         crate::tui::CommandResult {
-                                            message: format!("대화 기록을 요약으로 압축했습니다. (저장 실패: {e})"),
+                                            message: crate::i18n::tr_fmt(
+                                                "Compacted the conversation into a summary. (save failed: {e})",
+                                                &[&e.to_string()],
+                                            ),
                                             exit: false,
                                         }
                                     }
                                 }
                             }
                             Ok(_) => crate::tui::CommandResult {
-                                message: "요약이 비어 있어 컴팩트를 취소했습니다. (기존 세션 유지)".to_string(),
+                                message: crate::i18n::tr(
+                                    "Summary was empty; compaction cancelled. (existing session kept)",
+                                )
+                                .to_string(),
                                 exit: false,
                             },
                             Err(e) => crate::tui::CommandResult {
-                                message: format!("컴팩트 실패 (기존 세션 유지): {e}"),
+                                message: crate::i18n::tr_fmt(
+                                    "Compaction failed (existing session kept): {e}",
+                                    &[&e],
+                                ),
                                 exit: false,
                             },
                         }
@@ -773,9 +866,15 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             .collect()
                     };
                     let heading = if q.is_empty() {
-                        "프롬프트 히스토리 (최근 20개) — 빈 입력 상태에서 ↑/↓ 키로도 탐색할 수 있습니다:".to_string()
+                        crate::i18n::tr(
+                            "Prompt history (last 20) — you can also browse with ↑/↓ when the input is empty:",
+                        )
+                        .to_string()
                     } else {
-                        format!("프롬프트 히스토리 — '{}' 검색 결과 (최근 20개):", args_str.trim())
+                        crate::i18n::tr_fmt(
+                            "Prompt history — results for '{q}' (last 20):",
+                            &[args_str.trim()],
+                        )
                     };
                     let mut msg = heading;
                     let mut shown = 0usize;
@@ -785,16 +884,17 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                         if single.is_empty() {
                             continue;
                         }
-                        let display: String = single
-                            .chars()
-                            .take(70)
-                            .collect::<String>()
-                            + if single.chars().count() > 70 { "…" } else { "" };
+                        let display: String = single.chars().take(70).collect::<String>()
+                            + if single.chars().count() > 70 {
+                                "…"
+                            } else {
+                                ""
+                            };
                         msg.push_str(&format!("\n  {display}"));
                         shown += 1;
                     }
                     if shown == 0 {
-                        msg.push_str("\n  (히스토리가 없습니다)");
+                        msg.push_str(&format!("\n{}", crate::i18n::tr("  (no history)")));
                     }
                     crate::tui::CommandResult {
                         message: msg,
@@ -805,13 +905,13 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                     // 미지원 커맨드 안내 + 유사 커맨드 제안.
                     let raw = crate::slash::raw_name(line);
                     crate::tui::CommandResult {
-                        message: format!(
-                            "지원하지 않는 커맨드 '{line}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
-                            similar_suggestion_text(raw)
+                        message: crate::i18n::tr_fmt(
+                            "Unknown command '{line}'. Type /help to see available commands.{}",
+                            &[line, &similar_suggestion_text(raw)],
                         ),
                         exit: false,
                     }
-                },
+                }
             }
         };
 
@@ -892,7 +992,9 @@ async fn chat_loop(
     // 시작 배너.
     println!(
         "{}",
-        color("bulti chat — 대화형 프롬프트 루프 (/exit 또는 Ctrl-D 로 종료, /help 로 안내)")
+        color(crate::i18n::tr(
+            "bulti chat — interactive prompt loop (/exit or Ctrl-D to quit, /help for help)"
+        ))
     );
 
     let stdin = std::io::stdin();
@@ -901,12 +1003,17 @@ async fn chat_loop(
     let mut session_chain = make_uuid();
 
     // `--first` 가 있으면 첫 턴으로 사용.
-    let mut pending_first = first_prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let mut pending_first = first_prompt
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
 
     loop {
         // SIGINT 확인.
         if interrupted.load(Ordering::Relaxed) {
-            tracing::info!("SIGINT 수신 — 대화 종료");
+            tracing::info!(
+                "{}",
+                crate::i18n::tr("SIGINT received — ending conversation")
+            );
             return Ok(EXIT_INTERRUPTED);
         }
 
@@ -927,11 +1034,14 @@ async fn chat_loop(
         let line = match line {
             Some(Ok(line)) => line,
             Some(Err(e)) => {
-                tracing::error!("입력 읽기 오류: {e}");
+                tracing::error!(
+                    "{}",
+                    crate::i18n::tr_fmt("Input read error: {e}", &[&e.to_string()])
+                );
                 return Ok(EXIT_ERROR);
             }
             None => {
-                tracing::info!("EOF(Ctrl-D) — 대화 종료");
+                tracing::info!("{}", crate::i18n::tr("EOF (Ctrl-D) — ending conversation"));
                 return Ok(EXIT_OK);
             }
         };
@@ -949,7 +1059,7 @@ async fn chat_loop(
 
             match cmd_name {
                 "exit" => {
-                    tracing::info!("종료 명령 — 대화 종료");
+                    tracing::info!("{}", crate::i18n::tr("Ending conversation"));
                     return Ok(EXIT_OK);
                 }
                 "new" => {
@@ -959,11 +1069,22 @@ async fn chat_loop(
                     *resume_context = None;
                     session_chain = make_uuid();
                     turn = 0;
-                    println!("{}", color(&format!("새 세션을 시작합니다 (세션 id: {session_id})")));
+                    println!(
+                        "{}",
+                        color(&crate::i18n::tr_fmt(
+                            "Started a new session (session id: {id})",
+                            &[session_id]
+                        ))
+                    );
                     continue;
                 }
                 "help" => {
                     print_help();
+                    continue;
+                }
+                "language" => {
+                    let msg = set_language_command(cfg, args_str);
+                    println!("{}", color(&msg));
                     continue;
                 }
                 "resume" => {
@@ -977,12 +1098,30 @@ async fn chat_loop(
                                 *session = s.clone();
                                 // 이전 대화 기록을 다음 턴 프롬프트 앞에 포함.
                                 *resume_context = Some(s.conversation_context());
-                                println!("{}", color(&format!("세션 '{args_str}' 을(를) 재개합니다.")));
+                                println!(
+                                    "{}",
+                                    color(&crate::i18n::tr_fmt(
+                                        "Resuming session '{id}'.",
+                                        &[args_str]
+                                    ))
+                                );
                                 continue;
                             }
                             Err(e) => {
-                                tracing::error!("세션 '{args_str}' 복원 실패: {e}");
-                                println!("{}", color(&format!("세션 '{args_str}' 을(를) 찾을 수 없습니다.")));
+                                tracing::error!(
+                                    "{}",
+                                    crate::i18n::tr_fmt(
+                                        "Session restore failed for '{id}': {e}",
+                                        &[args_str, &e.to_string()]
+                                    )
+                                );
+                                println!(
+                                    "{}",
+                                    color(&crate::i18n::tr_fmt(
+                                        "Session '{id}' not found.",
+                                        &[args_str]
+                                    ))
+                                );
                                 continue;
                             }
                         }
@@ -1002,12 +1141,30 @@ async fn chat_loop(
                     if let Some(e) = effort {
                         if matches!(e.as_str(), "low" | "medium" | "high") {
                             endpoint.reasoning_effort = Some(e.clone());
-                            println!("{}", color(&format!("모델을 '{model_name}' (으)로, reasoning effort '{e}' (으)로 변경했습니다.")));
+                            println!(
+                                "{}",
+                                color(&crate::i18n::tr_fmt(
+                                    "Changed model to '{model}' and reasoning effort to '{effort}'.",
+                                    &[&model_name, &e]
+                                ))
+                            );
                         } else {
-                            println!("{}", color(&format!("모델을 '{model_name}' (으)로 변경했습니다. (effort '{e}' 는 무시됨 — low|medium|high)")));
+                            println!(
+                                "{}",
+                                color(&crate::i18n::tr_fmt(
+                                    "Changed model to '{model}'. (effort '{effort}' ignored — low|medium|high)",
+                                    &[&model_name, &e]
+                                ))
+                            );
                         }
                     } else {
-                        println!("{}", color(&format!("모델을 '{model_name}' (으)로 변경했습니다.")));
+                        println!(
+                            "{}",
+                            color(&crate::i18n::tr_fmt(
+                                "Changed model to '{model}'.",
+                                &[&model_name]
+                            ))
+                        );
                     }
                     // cfg.endpoints 에 반영 + 영속화.
                     if let Some(ep) = cfg.endpoints.get_mut(endpoint_name) {
@@ -1015,7 +1172,10 @@ async fn chat_loop(
                         ep.reasoning_effort = endpoint.reasoning_effort.clone();
                     }
                     if let Err(e) = cfg.save() {
-                        tracing::error!("설정 저장 실패: {e}");
+                        tracing::error!(
+                            "{}",
+                            crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+                        );
                     }
                     continue;
                 }
@@ -1023,7 +1183,10 @@ async fn chat_loop(
                     // `/effort <low|medium|high>` — reasoning effort 설정.
                     let e = args_str.trim().to_lowercase();
                     if !matches!(e.as_str(), "low" | "medium" | "high") {
-                        println!("{}", color("사용법: /effort <low|medium|high>"));
+                        println!(
+                            "{}",
+                            color(crate::i18n::tr("Usage: /effort <low|medium|high>"))
+                        );
                         continue;
                     }
                     endpoint.reasoning_effort = Some(e.clone());
@@ -1031,9 +1194,18 @@ async fn chat_loop(
                         ep.reasoning_effort = endpoint.reasoning_effort.clone();
                     }
                     if let Err(e) = cfg.save() {
-                        tracing::error!("설정 저장 실패: {e}");
+                        tracing::error!(
+                            "{}",
+                            crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+                        );
                     }
-                    println!("{}", color(&format!("reasoning effort 를 '{e}' (으)로 설정했습니다.")));
+                    println!(
+                        "{}",
+                        color(&crate::i18n::tr_fmt(
+                            "Set reasoning effort to '{effort}'.",
+                            &[&e]
+                        ))
+                    );
                     continue;
                 }
                 "endpoint" => {
@@ -1045,7 +1217,10 @@ async fn chat_loop(
                     continue;
                 }
                 "session-info" => {
-                    println!("{}", color(&session_info_text(session, endpoint.context_tokens)));
+                    println!(
+                        "{}",
+                        color(&session_info_text(session, endpoint.context_tokens))
+                    );
                     continue;
                 }
                 "sessions" => {
@@ -1056,35 +1231,66 @@ async fn chat_loop(
                 "fork" => {
                     match fork_session(session) {
                         Ok(m) => println!("{}", color(&m)),
-                        Err(e) => println!("{}", color(&format!("세션 분기 실패: {e}"))),
+                        Err(e) => println!(
+                            "{}",
+                            color(&crate::i18n::tr_fmt("Session fork failed: {e}", &[&e]))
+                        ),
                     }
                     continue;
                 }
                 "export" => {
                     match export_session(session, args_str) {
                         Ok(m) => println!("{}", color(&m)),
-                        Err(e) => println!("{}", color(&format!("내보내기 실패: {e}"))),
+                        Err(e) => println!(
+                            "{}",
+                            color(&crate::i18n::tr_fmt("Export failed: {e}", &[&e]))
+                        ),
                     }
                     continue;
                 }
                 "compact" => {
                     if session.turns.is_empty() {
-                        println!("{}", color("컴팩트할 대화가 없습니다. (턴 0개)"));
+                        println!(
+                            "{}",
+                            color(crate::i18n::tr("Nothing to compact. (0 turns)"))
+                        );
                     } else {
                         let transcript = session.conversation_context();
                         match compact_transcript(&client, endpoint, &transcript).await {
                             Ok(summary) if !summary.trim().is_empty() => {
                                 apply_compact(session, summary);
                                 if let Err(e) = session::save(session) {
-                                    tracing::error!("세션 저장 실패: {e}");
+                                    tracing::error!(
+                                        "{}",
+                                        crate::i18n::tr_fmt(
+                                            "Session save failed: {e}",
+                                            &[&e.to_string()]
+                                        )
+                                    );
                                 }
-                                println!("{}", color("대화 기록을 요약으로 압축했습니다."));
+                                println!(
+                                    "{}",
+                                    color(crate::i18n::tr(
+                                        "Compacted the conversation into a summary."
+                                    ))
+                                );
                             }
                             Ok(_) => {
-                                println!("{}", color("요약이 비어 있어 컴팩트를 취소했습니다. (기존 세션 유지)"));
+                                println!(
+                                    "{}",
+                                    color(crate::i18n::tr(
+                                        "Summary was empty; compaction cancelled. (existing session kept)"
+                                    ))
+                                );
                             }
                             Err(e) => {
-                                println!("{}", color(&format!("컴팩트 실패 (기존 세션 유지): {e}")));
+                                println!(
+                                    "{}",
+                                    color(&crate::i18n::tr_fmt(
+                                        "Compaction failed (existing session kept): {e}",
+                                        &[&e.to_string()]
+                                    ))
+                                );
                             }
                         }
                     }
@@ -1106,9 +1312,12 @@ async fn chat_loop(
                             .collect()
                     };
                     let heading = if q.is_empty() {
-                        "프롬프트 히스토리 (최근 20개):".to_string()
+                        crate::i18n::tr("Prompt history (last 20):").to_string()
                     } else {
-                        format!("프롬프트 히스토리 — '{}' 검색 결과 (최근 20개):", args_str.trim())
+                        crate::i18n::tr_fmt(
+                            "Prompt history — results for '{q}' (last 20):",
+                            &[args_str.trim()],
+                        )
                     };
                     println!("{}", color(&heading));
                     let mut shown = 0usize;
@@ -1117,16 +1326,17 @@ async fn chat_loop(
                         if single.is_empty() {
                             continue;
                         }
-                        let display: String = single
-                            .chars()
-                            .take(70)
-                            .collect::<String>()
-                            + if single.chars().count() > 70 { "…" } else { "" };
+                        let display: String = single.chars().take(70).collect::<String>()
+                            + if single.chars().count() > 70 {
+                                "…"
+                            } else {
+                                ""
+                            };
                         println!("{}", color(&format!("  {display}")));
                         shown += 1;
                     }
                     if shown == 0 {
-                        println!("{}", color("  (히스토리가 없습니다)"));
+                        println!("{}", color(crate::i18n::tr("  (no history)")));
                     }
                     continue;
                 }
@@ -1135,9 +1345,9 @@ async fn chat_loop(
                     let raw = crate::slash::raw_name(prompt_trimmed);
                     println!(
                         "{}",
-                        color(&format!(
-                            "지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
-                            similar_suggestion_text(raw)
+                        color(&crate::i18n::tr_fmt(
+                            "Unknown command '{line}'. Type /help to see available commands.{}",
+                            &[prompt_trimmed, &similar_suggestion_text(raw)]
                         ))
                     );
                     continue;
@@ -1147,9 +1357,9 @@ async fn chat_loop(
                     let raw = crate::slash::raw_name(prompt_trimmed);
                     println!(
                         "{}",
-                        color(&format!(
-                            "지원하지 않는 커맨드 '{prompt_trimmed}' 입니다. /help 를 입력해 사용 가능한 명령을 확인하세요.{}",
-                            similar_suggestion_text(raw)
+                        color(&crate::i18n::tr_fmt(
+                            "Unknown command '{line}'. Type /help to see available commands.{}",
+                            &[prompt_trimmed, &similar_suggestion_text(raw)]
                         ))
                     );
                     continue;
@@ -1177,8 +1387,7 @@ async fn chat_loop(
         // 한 턴 실행 (세그먼트 체인 — run 과 동일한 핸드오프 로직 재사용).
         // 스트림 텍스트 모드: delta 채널을 만들어 점진 출력 태스크와 병렬로 소비한다.
         let chain_id = make_uuid();
-        let (delta_tx, mut delta_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::llm::Delta>();
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<crate::llm::Delta>();
         let printer = tokio::spawn(async move {
             let mut printer = StreamPrinter::new(use_color);
             while let Some(delta) = delta_rx.recv().await {
@@ -1335,7 +1544,9 @@ pub async fn run_turn(
         let run_id = history::start_run(
             conn,
             &history::RunStart {
-                cwd: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+                cwd: std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
                 endpoint: endpoint_name.to_string(),
                 model: Some(endpoint.model.clone()),
                 prompt: current_prompt.clone(),
@@ -1350,7 +1561,14 @@ pub async fn run_turn(
         run_ids.push(run_id);
         parent_run_id = Some(run_id);
 
-        let result = run_segment(client, registry.as_ref(), &params, depth_guard.depth, delta_tx.clone()).await;
+        let result = run_segment(
+            client,
+            registry.as_ref(),
+            &params,
+            depth_guard.depth,
+            delta_tx.clone(),
+        )
+        .await;
 
         // files_touched 집계.
         for f in registry.files_touched() {
@@ -1414,7 +1632,9 @@ pub async fn run_turn(
                     exit_code: EXIT_OK,
                     assistant_content: with_status_note(
                         final_content,
-                        "(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)",
+                        crate::i18n::tr(
+                            "Segment failed — previous conversation context is preserved",
+                        ),
                     ),
                     reasoning_content: all_reasoning.clone(),
                     input_tokens: all_input,
@@ -1428,7 +1648,9 @@ pub async fn run_turn(
                     exit_code: EXIT_OK,
                     assistant_content: with_status_note(
                         final_content,
-                        "(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)",
+                        crate::i18n::tr(
+                            "Segment incomplete — previous conversation context is preserved",
+                        ),
                     ),
                     reasoning_content: all_reasoning.clone(),
                     input_tokens: all_input,
@@ -1486,8 +1708,8 @@ fn with_status_note(content: String, note: &str) -> String {
 /// 안내가 없으면 빈 문자열 (호출부가 일괄 출력 폴백을 그대로 쓴다).
 fn strip_status_note(content: &str) -> String {
     let notes = [
-        "(세그먼트 실패 — 이전 대화 맥락은 유지됩니다)",
-        "(세그먼트 미완료 — 이전 대화 맥락은 유지됩니다)",
+        crate::i18n::tr("Segment failed — previous conversation context is preserved"),
+        crate::i18n::tr("Segment incomplete — previous conversation context is preserved"),
     ];
     for note in &notes {
         if content.ends_with(note) {
@@ -1502,9 +1724,13 @@ fn usage_text(session: &session::Session, endpoint: &EndpointConfig) -> String {
     let total_in = session.total_input_tokens();
     let total_out = session.total_output_tokens();
     let mut out = String::new();
-    out.push_str(&format!(
-        "세션 총합: ↑{total_in} ↓{total_out} (턴 {})",
-        session.turns.len()
+    out.push_str(&crate::i18n::tr_fmt(
+        "Session total: ↑{in} ↓{out} ({turns} turns)",
+        &[
+            &total_in.to_string(),
+            &total_out.to_string(),
+            &session.turns.len().to_string(),
+        ],
     ));
     for (model, in_t, out_t) in session.per_model_usage() {
         out.push_str(&format!("\n  {model}: ↑{in_t} ↓{out_t}"));
@@ -1515,9 +1741,17 @@ fn usage_text(session: &session::Session, endpoint: &EndpointConfig) -> String {
     ) {
         (Some(pin), Some(pout)) => {
             let c = total_in as f64 / 1_000_000.0 * pin + total_out as f64 / 1_000_000.0 * pout;
-            format!("\n비용: ${c:.4}")
+            format!(
+                "\n{}",
+                crate::i18n::tr_fmt("Cost: ${amount}", &[&format!("{c:.4}")])
+            )
         }
-        _ => "\n비용: — (bulti.toml 에 input_price_per_mtok·output_price_per_mtok 미설정)".to_string(),
+        _ => format!(
+            "\n{}",
+            crate::i18n::tr(
+                "Cost: — (input_price_per_mtok / output_price_per_mtok not set in bulti.toml)"
+            )
+        ),
     };
     out.push_str(&cost);
     out
@@ -1525,7 +1759,9 @@ fn usage_text(session: &session::Session, endpoint: &EndpointConfig) -> String {
 
 /// `/model`(무인자) — 사용 가능한 모델 목록 텍스트. 현재 모델을 표시한다.
 fn available_models_text(cfg: &Config, current: &str) -> String {
-    let mut out = String::from("사용 가능한 모델 (설정된 엔드포인트 기준):");
+    let mut out = String::from(crate::i18n::tr(
+        "Available models (from configured endpoints):",
+    ));
     let mut seen: Vec<&str> = Vec::new();
     if !current.is_empty() {
         seen.push(current);
@@ -1536,14 +1772,24 @@ fn available_models_text(cfg: &Config, current: &str) -> String {
         }
     }
     if seen.is_empty() {
-        out.push_str("\n  (모델이 설정되지 않았습니다 — /model <모델명> 으로 지정)");
+        out.push_str(&format!(
+            "\n{}",
+            crate::i18n::tr("  (no model configured — set one with /model <name>)")
+        ));
         return out;
     }
     for m in seen {
-        let mark = if m == current { " (현재)" } else { "" };
+        let mark = if m == current {
+            crate::i18n::tr(" (current)")
+        } else {
+            ""
+        };
         out.push_str(&format!("\n  {m}{mark}"));
     }
-    out.push_str("\n사용법: /model <모델명> [low|medium|high]");
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr("Usage: /model <name> [low|medium|high]")
+    ));
     out
 }
 
@@ -1554,9 +1800,9 @@ fn endpoint_text(cfg: &Config, active_name: &str, args: &str) -> String {
     if !name.is_empty() {
         return match cfg.endpoints.get(name) {
             Some(ep) => endpoint_detail_text(name, ep, name == active_name),
-            None => format!(
-                "엔드포인트를 찾을 수 없습니다: {name}\n{}",
-                endpoint_list_text(cfg, active_name)
+            None => crate::i18n::tr_fmt(
+                "Endpoint not found: {name}\n{list}",
+                &[name, &endpoint_list_text(cfg, active_name)],
             ),
         };
     }
@@ -1575,12 +1821,14 @@ fn endpoint_detail_text(name: &str, ep: &EndpointConfig, active: bool) -> String
     let ctx = if ep.context_tokens > 0 {
         ep.context_tokens.to_string()
     } else {
-        "자동(프로브)".to_string()
+        crate::i18n::tr("auto (probe)").to_string()
     };
-    let mut out = format!(
-        "엔드포인트: {name}{}",
-        if active { " (활성)" } else { "" }
-    );
+    let active_mark = if active {
+        crate::i18n::tr(" (active)")
+    } else {
+        ""
+    };
+    let mut out = crate::i18n::tr_fmt("Endpoint: {name}{active}", &[name, active_mark]);
     out.push_str(&format!("\n  url: {}", ep.url));
     out.push_str(&format!("\n  model: {}", ep.model));
     out.push_str(&format!("\n  context_tokens: {ctx}"));
@@ -1597,11 +1845,15 @@ fn endpoint_detail_text(name: &str, ep: &EndpointConfig, active: bool) -> String
 /// 엔드포인트 목록 텍스트 (활성 표시).
 fn endpoint_list_text(cfg: &Config, active_name: &str) -> String {
     if cfg.endpoints.is_empty() {
-        return "등록된 엔드포인트가 없습니다.".to_string();
+        return crate::i18n::tr("No endpoints registered.").to_string();
     }
-    let mut out = String::from("엔드포인트 목록:");
+    let mut out = String::from(crate::i18n::tr("Endpoint list:"));
     for (name, ep) in &cfg.endpoints {
-        let mark = if name == active_name { " (활성)" } else { "" };
+        let mark = if name == active_name {
+            crate::i18n::tr(" (active)")
+        } else {
+            ""
+        };
         out.push_str(&format!("\n  {name}{mark} — {} ({})", ep.model, ep.url));
     }
     out
@@ -1613,7 +1865,10 @@ fn mcp_text(cfg: &Config, args: &str) -> String {
     if !name.is_empty() {
         return match cfg.mcp.get(name) {
             Some(m) => mcp_detail_text(name, m),
-            None => format!("MCP 서버를 찾을 수 없습니다: {name}\n{}", mcp_list_text(cfg)),
+            None => crate::i18n::tr_fmt(
+                "MCP server not found: {name}\n{list}",
+                &[name, &mcp_list_text(cfg)],
+            ),
         };
     }
     mcp_list_text(cfg)
@@ -1622,13 +1877,15 @@ fn mcp_text(cfg: &Config, args: &str) -> String {
 /// MCP 서버 목록 텍스트.
 fn mcp_list_text(cfg: &Config) -> String {
     if cfg.mcp.is_empty() {
-        return "(MCP 서버 없음)".to_string();
+        return crate::i18n::tr("(no MCP server)").to_string();
     }
-    let mut out = String::from("MCP 서버:");
+    let mut out = String::from(crate::i18n::tr("MCP servers:"));
     for (name, m) in &cfg.mcp {
         out.push_str(&format!(
             "\n  {name} — {}",
-            m.description.as_deref().unwrap_or("(설명 없음)")
+            m.description
+                .as_deref()
+                .unwrap_or(crate::i18n::tr("(no description)"))
         ));
     }
     out
@@ -1636,9 +1893,12 @@ fn mcp_list_text(cfg: &Config) -> String {
 
 /// 단일 MCP 서버 설정 상세 텍스트 (env 값은 노출하지 않고 키만 표시).
 fn mcp_detail_text(name: &str, m: &McpConfig) -> String {
-    let mut out = format!("MCP 서버: {name}");
+    let mut out = crate::i18n::tr_fmt("MCP server: {name}", &[name]);
     if let Some(d) = &m.description {
-        out.push_str(&format!("\n  설명: {d}"));
+        out.push_str(&format!(
+            "\n{}",
+            crate::i18n::tr_fmt("  description: {d}", &[d])
+        ));
     }
     out.push_str(&format!("\n  command: {}", m.command));
     if !m.args.is_empty() {
@@ -1653,11 +1913,7 @@ fn mcp_detail_text(name: &str, m: &McpConfig) -> String {
 
 /// bool 을 on/off 로 표시한다.
 fn yes_no(v: bool) -> &'static str {
-    if v {
-        "on"
-    } else {
-        "off"
-    }
+    if v { "on" } else { "off" }
 }
 
 /// `/session-info` — 현재 세션 정보 텍스트 (id·cwd·모델·컨텍스트 사용량).
@@ -1667,40 +1923,77 @@ fn session_info_text(session: &session::Session, context_tokens: u64) -> String 
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let mut out = String::new();
-    out.push_str(&format!("세션 id: {}", session.session_id));
-    out.push_str(&format!("\ncwd: {cwd}"));
-    out.push_str(&format!("\n엔드포인트: {}", session.endpoint));
-    out.push_str(&format!("\n모델: {}", session.model));
-    out.push_str(&format!("\n턴 수: {}", session.turns.len()));
-    match est.checked_mul(100).and_then(|v| v.checked_div(context_tokens)) {
+    out.push_str(&crate::i18n::tr_fmt(
+        "Session id: {id}",
+        &[&session.session_id],
+    ));
+    out.push_str(&format!("\n{}", crate::i18n::tr_fmt("cwd: {cwd}", &[&cwd])));
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr_fmt("Endpoint: {ep}", &[&session.endpoint])
+    ));
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr_fmt("Model: {m}", &[&session.model])
+    ));
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr_fmt("Turns: {n}", &[&session.turns.len().to_string()])
+    ));
+    match est
+        .checked_mul(100)
+        .and_then(|v| v.checked_div(context_tokens))
+    {
         Some(pct) => {
             let pct = pct.min(999);
-            out.push_str(&format!("\n컨텍스트 사용량: ~{est} / {context_tokens} 토큰 (약 {pct}%)"));
+            out.push_str(&format!(
+                "\n{}",
+                crate::i18n::tr_fmt(
+                    "Context usage: ~{est} / {ctx} tokens (~{pct}%)",
+                    &[
+                        &est.to_string(),
+                        &context_tokens.to_string(),
+                        &pct.to_string()
+                    ],
+                )
+            ));
         }
         None => {
-            out.push_str(&format!("\n컨텍스트 사용량: ~{est} 토큰 (추정 — 엔드포인트 context_tokens 미설정)"));
+            out.push_str(&format!(
+                "\n{}",
+                crate::i18n::tr_fmt(
+                    "Context usage: ~{est} tokens (estimated — endpoint context_tokens not set)",
+                    &[&est.to_string()],
+                )
+            ));
         }
     }
-    out.push_str(&format!("\n생성: {}", session.created_at));
-    out.push_str(&format!("\n마지막 갱신: {}", session.updated_at));
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr_fmt("Created: {t}", &[&session.created_at])
+    ));
+    out.push_str(&format!(
+        "\n{}",
+        crate::i18n::tr_fmt("Last updated: {t}", &[&session.updated_at])
+    ));
     out
 }
 
 /// `/sessions` — 세션 목록 텍스트.
 fn sessions_list_text() -> String {
     match session::list() {
-        Ok(metas) if metas.is_empty() => "세션이 없습니다.".to_string(),
+        Ok(metas) if metas.is_empty() => crate::i18n::tr("No sessions.").to_string(),
         Ok(metas) => {
             let mut out = String::new();
             for m in &metas {
-                out.push_str(&format!(
-                    "{}  턴={}  모델={}  갱신={}\n",
-                    m.id, m.turns, m.model, m.updated_at
+                out.push_str(&crate::i18n::tr_fmt(
+                    "{id}  Turn={t}  Model={m}  Updated={u}\n",
+                    &[&m.id, &m.turns.to_string(), &m.model, &m.updated_at],
                 ));
             }
             out
         }
-        Err(e) => format!("세션 목록 조회 실패: {e}"),
+        Err(e) => crate::i18n::tr_fmt("Failed to list sessions: {e}", &[&e.to_string()]),
     }
 }
 
@@ -1716,24 +2009,70 @@ fn similar_suggestion_text(raw: &str) -> String {
             .map(|s| format!("/{s}"))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("\n유사한 커맨드: {list}")
+        crate::i18n::tr_fmt("\nSimilar commands: {list}", &[&list])
+    }
+}
+
+/// `/language` — 현재 언어 조회 또는 변경. 설정을 영속화하고 전역 언어를 갱신한다.
+fn set_language_command(cfg: &mut Config, args: &str) -> String {
+    let arg = args.trim();
+    if arg.is_empty() {
+        let cur = crate::i18n::current();
+        return crate::i18n::tr_fmt(
+            "Language: {name} ({code})\nAvailable: en, ko, ja\nUsage: /language <en|ko|ja>",
+            &[cur.native_name(), cur.code()],
+        );
+    }
+    match crate::i18n::Language::from_code(arg) {
+        Some(lang) => {
+            cfg.language = lang;
+            if let Err(e) = cfg.save() {
+                tracing::error!(
+                    "{}",
+                    crate::i18n::tr_fmt("Settings save failed: {e}", &[&e.to_string()])
+                );
+            }
+            crate::i18n::set_language(lang);
+            crate::i18n::tr_fmt(
+                "Language changed to {name} ({code}).",
+                &[lang.native_name(), lang.code()],
+            )
+        }
+        None => crate::i18n::tr_fmt("Unsupported language '{arg}'. Use en, ko, or ja.", &[arg]),
     }
 }
 
 /// `/resume` 단독 입력 시 사용할 수 있는 세션 목록 안내.
 fn resume_suggest_text() -> String {
-    let mut out = String::from("세션 id 를 지정해 주세요. 사용 가능한 세션:");
+    let mut out = String::from(crate::i18n::tr("Specify a session id. Available sessions:"));
     match session::list() {
-        Ok(metas) if metas.is_empty() => out.push_str("\n  (세션이 없습니다)"),
+        Ok(metas) if metas.is_empty() => {
+            out.push_str(&format!("\n{}", crate::i18n::tr("  (no sessions)")));
+        }
         Ok(metas) => {
             for m in metas.iter().take(10) {
-                out.push_str(&format!("\n  /resume {}  (턴={} 모델={})", m.id, m.turns, m.model));
+                out.push_str(&format!(
+                    "\n{}",
+                    crate::i18n::tr_fmt(
+                        "  /resume {id}  (turn={t} model={m})",
+                        &[&m.id, &m.turns.to_string(), &m.model],
+                    )
+                ));
             }
             if metas.len() > 10 {
-                out.push_str(&format!("\n  … 외 {}개 (전체 목록: /sessions)", metas.len() - 10));
+                out.push_str(&format!(
+                    "\n{}",
+                    crate::i18n::tr_fmt(
+                        "  … and {n} more (full list: /sessions)",
+                        &[&(metas.len() - 10).to_string()],
+                    )
+                ));
             }
         }
-        Err(e) => out.push_str(&format!("\n  (세션 목록 조회 실패: {e})")),
+        Err(e) => out.push_str(&format!(
+            "\n{}",
+            crate::i18n::tr_fmt("  (failed to list sessions: {e})", &[&e.to_string()])
+        )),
     }
     out
 }
@@ -1743,8 +2082,9 @@ fn fork_session(sess: &session::Session) -> Result<String, String> {
     let new_id = make_uuid();
     let forked = sess.fork(&new_id);
     session::save(&forked).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "세션을 분기했습니다. 새 세션 id: {new_id} (재개: /resume {new_id})"
+    Ok(crate::i18n::tr_fmt(
+        "Forked the session. New session id: {id} (resume: /resume {id})",
+        &[&new_id, &new_id],
     ))
 }
 
@@ -1757,7 +2097,10 @@ fn export_session(sess: &session::Session, path_arg: &str) -> Result<String, Str
         path_arg.trim().to_string()
     };
     std::fs::write(&path, sess.export_markdown()).map_err(|e| e.to_string())?;
-    Ok(format!("대화 기록을 {path} (으)로 내보냈습니다."))
+    Ok(crate::i18n::tr_fmt(
+        "Exported conversation history to {path}.",
+        &[&path],
+    ))
 }
 
 /// `/compact` — 대화 기록을 LLM 한 번 호출로 요약한다.
@@ -1767,9 +2110,9 @@ async fn compact_transcript(
     endpoint: &EndpointConfig,
     transcript: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let instruction = "아래 대화 기록을 간결하게 요약하세요. \
-결정·사실·수정된 파일·미해결 문제를 빠짐없이 담되 불필요한 대화는 압축하세요. \
-요약만 출력하고 다른 설명은 붙이지 마세요.\n\n[대화 기록]\n";
+    let instruction = crate::i18n::tr(
+        "Summarize the conversation below concisely. Include all decisions, facts, changed files, and unresolved issues, but compress unnecessary dialogue. Output only the summary without extra explanation.\n\n[Conversation]\n",
+    );
     let req = crate::llm::ChatRequest {
         model: endpoint.model.clone(),
         messages: vec![crate::llm::Message {
@@ -1799,7 +2142,7 @@ async fn compact_transcript(
 fn apply_compact(sess: &mut session::Session, summary: String) {
     sess.turns = vec![session::TurnRecord {
         turn: 0,
-        user: "[컴팩트된 대화 요약]".to_string(),
+        user: crate::i18n::tr("[compacted conversation summary]").to_string(),
         assistant: summary,
         chain_id: "compact".to_string(),
         files_touched: vec![],
@@ -1814,12 +2157,24 @@ fn apply_compact(sess: &mut session::Session, summary: String) {
 /// 커맨드 목록은 레지스트리(`crate::slash::COMMANDS`)에서 동적으로 만든다.
 /// 하드코딩하던 시절 `/history` 가 빠져 목록이 낡는 문제를 막는다.
 fn print_help() {
-    println!("내부 명령:");
+    println!("{}", crate::i18n::tr("Internal commands:"));
     for c in crate::slash::COMMANDS {
-        println!("  {:<18} — {}", c.usage, c.description);
+        println!(
+            "  {:<18} — {}",
+            crate::i18n::tr(c.usage),
+            crate::i18n::tr(c.description)
+        );
     }
-    println!("  {:<18} — {}", "Ctrl-D", "대화 종료 (EOF)");
-    println!("  {:<18} — {}", "Ctrl+C", "중단 후 종료");
+    println!(
+        "  {:<18} — {}",
+        "Ctrl-D",
+        crate::i18n::tr("Quit conversation (EOF)")
+    );
+    println!(
+        "  {:<18} — {}",
+        "Ctrl+C",
+        crate::i18n::tr("Interrupt and quit")
+    );
 }
 
 /// SIGINT 감시 태스크를 spawn 한다 (run 과 동일).
@@ -1935,17 +2290,17 @@ mod tests {
             .insert("SECRET".to_string(), "topsecret".to_string());
 
         let list = endpoint_list_text(&cfg, "main");
-        assert!(list.contains("main (활성)"));
+        assert!(list.contains("main (active)"));
         assert!(list.contains("qwen3.8-27b-q2"));
 
         let detail = endpoint_text(&cfg, "main", "");
-        assert!(detail.contains("엔드포인트: main (활성)"));
-        assert!(detail.contains("context_tokens: 자동(프로브)"));
+        assert!(detail.contains("Endpoint: main (active)"));
+        assert!(detail.contains("context_tokens: auto (probe)"));
         assert!(detail.contains("vision: on"));
 
         let missing = endpoint_text(&cfg, "main", "nope");
-        assert!(missing.contains("찾을 수 없습니다: nope"));
-        assert!(missing.contains("엔드포인트 목록:"));
+        assert!(missing.contains("Endpoint not found: nope"));
+        assert!(missing.contains("Endpoint list:"));
 
         let mcp = mcp_text(&cfg, "");
         assert!(mcp.contains("files"));
@@ -1957,7 +2312,7 @@ mod tests {
         assert!(!mcp_detail.contains("topsecret"));
 
         let mcp_missing = mcp_text(&cfg, "nope");
-        assert!(mcp_missing.contains("찾을 수 없습니다: nope"));
+        assert!(mcp_missing.contains("MCP server not found: nope"));
     }
 
     /// `/model` 무인자 목록은 현재 모델을 표시한다.
@@ -1965,10 +2320,10 @@ mod tests {
     fn available_models_text_marks_current() {
         let cfg = crate::config::tests::sample_config();
         let text = available_models_text(&cfg, "qwen3.8-27b-q2");
-        assert!(text.contains("qwen3.8-27b-q2 (현재)"));
+        assert!(text.contains("qwen3.8-27b-q2 (current)"));
         let text = available_models_text(&cfg, "other");
-        assert!(text.contains("other (현재)"));
+        assert!(text.contains("other (current)"));
         assert!(text.contains("qwen3.8-27b-q2"));
-        assert!(!text.contains("qwen3.8-27b-q2 (현재)"));
+        assert!(!text.contains("qwen3.8-27b-q2 (current)"));
     }
 }

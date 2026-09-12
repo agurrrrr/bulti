@@ -9,13 +9,13 @@
 
 use std::io::{IsTerminal, Read};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::RunArgs;
-use crate::agent::handoff::{build_new_segment_prompt, HandoffDecision, HandoffDepthGuard};
-use crate::agent::loop_::{chain_status, run_segment, SegmentParams, SegmentStatus};
+use crate::agent::handoff::{HandoffDecision, HandoffDepthGuard, build_new_segment_prompt};
+use crate::agent::loop_::{SegmentParams, SegmentStatus, chain_status, run_segment};
 use crate::config::{Config, EndpointConfig};
 use crate::history;
 use crate::llm::LlmClient;
@@ -67,7 +67,10 @@ pub fn run(args: RunArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
     let mut endpoint = match cfg.endpoints.get(&endpoint_name) {
         Some(ep) => ep.clone(),
         None => {
-            tracing::error!("엔드포인트 '{endpoint_name}' 이(가) 없습니다");
+            tracing::error!(
+                "{}",
+                crate::i18n::tr_fmt("Endpoint '{name}' not found", &[&endpoint_name])
+            );
             return Ok(1);
         }
     };
@@ -83,7 +86,8 @@ pub fn run(args: RunArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
     };
 
     // 시스템 프롬프트 오버라이드.
-    let override_opt = crate::cli::prompt_cmd::override_from_run_args(&args.system_file, &args.system);
+    let override_opt =
+        crate::cli::prompt_cmd::override_from_run_args(&args.system_file, &args.system);
 
     // 프롬프트 조립.
     let skills = crate::skills::discover(&project_root, &global_dir)?;
@@ -92,16 +96,14 @@ pub fn run(args: RunArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
         .iter()
         .map(|(name, m)| crate::prompt::McpIndex {
             name: name.clone(),
-            description: m.description.clone().unwrap_or_else(|| "(설명 없음)".to_string()),
+            description: m
+                .description
+                .clone()
+                .unwrap_or_else(|| crate::i18n::tr("(no description)").to_string()),
         })
         .collect();
-    let ctx = crate::prompt::context_from_config(
-        cfg,
-        cwd.clone(),
-        project_root,
-        skills,
-        mcp_servers,
-    )?;
+    let ctx =
+        crate::prompt::context_from_config(cfg, cwd.clone(), project_root, skills, mcp_servers)?;
     let system_prompt = crate::prompt::assemble(&ctx, override_opt)?;
 
     // 도구 레지스트리.
@@ -151,7 +153,10 @@ pub fn run(args: RunArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::E
     } else if verbose {
         let color = if use_color { "\x1b[1m" } else { "" };
         let reset = if use_color { "\x1b[0m" } else { "" };
-        eprintln!("{color}체인 종료: {}{reset}", outcome.as_str());
+        eprintln!(
+            "{color}{}{reset}",
+            crate::i18n::tr_fmt("Chain finished: {status}", &[outcome.as_str()])
+        );
     }
 
     Ok(outcome.exit_code() as i32)
@@ -175,7 +180,9 @@ async fn run_chain(
 ) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     let client = LlmClient::new();
     let mut depth_guard = HandoffDepthGuard::new();
-    let max_depth = args.max_handoff_depth.unwrap_or(cfg.context.max_handoff_depth);
+    let max_depth = args
+        .max_handoff_depth
+        .unwrap_or(cfg.context.max_handoff_depth);
     let max_time = args.max_time;
 
     let start = Instant::now();
@@ -191,7 +198,10 @@ async fn run_chain(
     loop {
         // max-depth 가드.
         if depth_guard.depth >= max_depth {
-            tracing::warn!("max-handoff-depth 도달 — 체인 종료");
+            tracing::warn!(
+                "{}",
+                crate::i18n::tr("max-handoff-depth reached — ending chain")
+            );
             return Ok(RunOutcome::Incomplete);
         }
         // max-time 가드.
@@ -221,7 +231,9 @@ async fn run_chain(
         let run_id = history::start_run(
             conn,
             &history::RunStart {
-                cwd: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+                cwd: std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
                 endpoint: endpoint_name.to_string(),
                 model: Some(endpoint.model.clone()),
                 prompt: current_prompt.clone(),
@@ -241,12 +253,16 @@ async fn run_chain(
             let color = if use_color { "\x1b[36m" } else { "" };
             let reset = if use_color { "\x1b[0m" } else { "" };
             eprintln!(
-                "{color}세그먼트 {segment_index} 시작 (depth {}){reset}",
-                depth_guard.depth
+                "{color}{}{reset}",
+                crate::i18n::tr_fmt(
+                    "Segment {i} started (depth {d})",
+                    &[&segment_index.to_string(), &depth_guard.depth.to_string()]
+                )
             );
         }
 
-        let result = run_segment(&client, registry.as_ref(), &params, depth_guard.depth, None).await;
+        let result =
+            run_segment(&client, registry.as_ref(), &params, depth_guard.depth, None).await;
 
         // files_touched 집계.
         for f in registry.files_touched() {
@@ -279,7 +295,13 @@ async fn run_chain(
         if verbose {
             let color = if use_color { "\x1b[32m" } else { "" };
             let reset = if use_color { "\x1b[0m" } else { "" };
-            eprintln!("{color}세그먼트 {segment_index} 종료: {status_str}{reset}");
+            eprintln!(
+                "{color}{}{reset}",
+                crate::i18n::tr_fmt(
+                    "Segment {i} finished: {status}",
+                    &[&segment_index.to_string(), status_str]
+                )
+            );
         }
 
         // 핸드오프 판정으로 다음 세그먼트 결정.
@@ -422,7 +444,10 @@ fn finish_chain(
     }
 
     // 참조용 체인 상태 로그.
-    tracing::info!("체인 상태: {status}");
+    tracing::info!(
+        "{}",
+        crate::i18n::tr_fmt("Chain status: {status}", &[status])
+    );
     Ok(outcome)
 }
 

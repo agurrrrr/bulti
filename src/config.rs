@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::i18n::Language;
+
 /// 설정 파일 버전.
 pub const CONFIG_VERSION: u32 = 1;
 
@@ -157,6 +159,9 @@ pub struct Config {
     pub version: u32,
     #[serde(default)]
     pub active_endpoint: Option<String>,
+    /// UI·응답 언어 (en|ko|ja). 기본 영어.
+    #[serde(default)]
+    pub language: Language,
     #[serde(default)]
     pub endpoints: std::collections::BTreeMap<String, EndpointConfig>,
     #[serde(default)]
@@ -176,6 +181,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             active_endpoint: None,
+            language: Language::En,
             endpoints: std::collections::BTreeMap::new(),
             mcp: std::collections::BTreeMap::new(),
             context: ContextConfig::default(),
@@ -266,6 +272,7 @@ pub(crate) mod tests {
         Config {
             version: 1,
             active_endpoint: Some("main".to_string()),
+            language: Language::En,
             endpoints: std::collections::BTreeMap::from([(
                 "main".to_string(),
                 EndpointConfig {

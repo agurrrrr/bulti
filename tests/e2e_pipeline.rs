@@ -519,6 +519,7 @@ async fn chat_turn_end_to_end() {
     let cfg = Config {
         version: 1,
         active_endpoint: None,
+        language: bulti::i18n::Language::En,
         endpoints: BTreeMap::new(),
         mcp: BTreeMap::new(),
         context: ContextConfig {
@@ -607,6 +608,7 @@ async fn chat_turn_reasoning_content_end_to_end() {
     let cfg = Config {
         version: 1,
         active_endpoint: None,
+        language: bulti::i18n::Language::En,
         endpoints: BTreeMap::new(),
         mcp: BTreeMap::new(),
         context: ContextConfig {

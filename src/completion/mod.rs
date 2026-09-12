@@ -19,7 +19,14 @@ pub type CompletionSource = Vec<String>;
 ///
 /// 설정·세션을 못 열면 해당 목록은 빈 채로 반환한다 (자동완성은 최선 노력).
 pub fn load_slash_context() -> crate::slash::CompletionContext {
-    let mut ctx = crate::slash::CompletionContext::default();
+    // 언어 후보는 정적이다.
+    let mut ctx = crate::slash::CompletionContext {
+        languages: crate::i18n::Language::ALL
+            .iter()
+            .map(|l| l.code().to_string())
+            .collect(),
+        ..Default::default()
+    };
 
     if let Ok(cfg) = crate::config::Config::load() {
         ctx.endpoints = cfg.endpoints.keys().cloned().collect();
