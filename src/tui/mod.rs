@@ -811,10 +811,16 @@ fn draw_title(
             frame,
             phase,
             format_elapsed(elapsed_ms),
-            crate::i18n::tr_fmt("Bulti Chat — {endpoint} / {model}", &[endpoint_name, model])
+            crate::i18n::tr_fmt(
+                "Bulti — Local LLM Lightweight Coding Agent — {endpoint} / {model}",
+                &[endpoint_name, model],
+            )
         )
     } else {
-        crate::i18n::tr_fmt("Bulti Chat — {endpoint} / {model}", &[endpoint_name, model])
+        crate::i18n::tr_fmt(
+            "Bulti — Local LLM Lightweight Coding Agent — {endpoint} / {model}",
+            &[endpoint_name, model],
+        )
     };
     let p = Paragraph::new(title)
         .style(

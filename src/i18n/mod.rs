@@ -167,9 +167,9 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("none", "없음", "なし"),
     // ── TUI ────────────────────────────────────────────
     (
-        "Bulti Chat — {endpoint} / {model}",
-        "불티(Bulti) 대화형 채팅 — {endpoint} / {model}",
-        "Bulti チャット — {endpoint} / {model}",
+        "Bulti — Local LLM Lightweight Coding Agent — {endpoint} / {model}",
+        "불티(Bulti) — Local LLM 경량 코딩 에이전트 — {endpoint} / {model}",
+        "Bulti — Local LLM 軽量コーディングエージェント — {endpoint} / {model}",
     ),
     (
         "Input (Enter send · Shift+Enter newline · ↑↓ history · Tab complete · Ctrl+T thinking · Ctrl+Q quit)",
