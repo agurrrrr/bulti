@@ -139,14 +139,6 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_args: true,
         args_required: false,
     },
-    SlashCommand {
-        name: "multiline",
-        aliases: &[],
-        description: "멀티라인 입력 모드 토글 (Shift+Enter 줄바꿈)",
-        usage: "/multiline",
-        takes_args: false,
-        args_required: false,
-    },
 ];
 
 /// 자동완성 제안 항목.
@@ -477,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_history_and_multiline() {
+    fn parses_history() {
         // /history 는 alias h, 인자 선택.
         let p = parse("/history").unwrap();
         assert_eq!(p.name, "history");
@@ -487,14 +479,8 @@ mod tests {
         assert_eq!(p.args, "검색어");
         let p = parse("/h").unwrap();
         assert_eq!(p.name, "history");
-        // /multiline 는 인자 없는 토글.
-        let p = parse("/multiline").unwrap();
-        assert_eq!(p.name, "multiline");
-        assert_eq!(p.args, "");
         assert!(is_supported("history"));
-        assert!(is_supported("multiline"));
         assert_eq!(resolve_alias("h"), "history");
-        assert_eq!(resolve_alias("multiline"), "multiline");
     }
 
     #[test]

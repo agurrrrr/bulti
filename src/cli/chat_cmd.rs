@@ -1130,13 +1130,6 @@ async fn chat_loop(
                     }
                     continue;
                 }
-                "multiline" => {
-                    println!(
-                        "{}",
-                        color("/multiline 는 비 TTY 모드에서 지원하지 않습니다 (TTY 터미널에서 TUI 로 실행하세요).")
-                    );
-                    continue;
-                }
                 "" => {
                     // 미지원 슬래시 커맨드 안내 + 유사 커맨드 제안.
                     let raw = crate::slash::raw_name(prompt_trimmed);
@@ -1819,7 +1812,7 @@ fn apply_compact(sess: &mut session::Session, summary: String) {
 /// 내부 명령 도움말 출력.
 ///
 /// 커맨드 목록은 레지스트리(`crate::slash::COMMANDS`)에서 동적으로 만든다.
-/// 하드코딩하던 시절 `/history`·`/multiline` 이 빠져 목록이 낡는 문제를 막는다.
+/// 하드코딩하던 시절 `/history` 가 빠져 목록이 낡는 문제를 막는다.
 fn print_help() {
     println!("내부 명령:");
     for c in crate::slash::COMMANDS {

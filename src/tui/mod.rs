@@ -7,6 +7,7 @@
 //!
 //! 키 바인딩:
 //! - `Enter`           — 대화 전송
+//! - `Shift+Enter` / `Alt+Enter` — 입력창 줄바꿈 (멀티라인 입력)
 //! - `Ctrl+S`          — 세션 저장 안내 (매 턴 자동 저장)
 //! - `Ctrl+Q`          — 종료 (exit 0)
 //! - `Ctrl+C`          — 즉시 종료 (SIGINT 규약 130)
@@ -18,10 +19,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -229,10 +234,17 @@ pub struct TuiOptions {
 }
 
 /// raw mode / alternate screen / tracing 차단을 해제한다.
-struct TerminalGuard;
+/// `enhanced_keys` 가 참이면 터미널 키보드 프로토콜(kitty)도 원복한다.
+struct TerminalGuard {
+    enhanced_keys: bool,
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.enhanced_keys {
+            // raw mode 종료 전에 원복해야 한다 (kitty progressive enhancement pop).
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         set_active(false);
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
@@ -240,6 +252,10 @@ impl Drop for TerminalGuard {
         let _ = stdout.flush();
     }
 }
+
+/// 입력창이 늘어날 수 있는 최대 높이 (테두리 포함). 대화 영역을 지나치게
+/// 잠식하지 않도록 제한한다.
+const INPUT_MAX_HEIGHT: u16 = 12;
 
 /// TUI 채팅 인터페이스를 실행한다. TTY 가 아니면 `None` 을 반환해 호출부가
 /// 스트림 텍스트 모드로 대화하게 한다.
@@ -268,9 +284,24 @@ where
     }
 
     set_active(true);
-    let _guard = TerminalGuard;
+    let mut guard = TerminalGuard {
+        enhanced_keys: false,
+    };
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide)?;
+    // kitty 키보드 프로토콜을 켜야 Shift+Enter 의 SHIFT 수식키가 전달된다.
+    // 이를 켜지 않으면 대부분 터미널이 Shift+Enter 를 일반 Enter 와 동일한
+    // 시퀀스로 보내 줄바꿈을 구분할 수 없다. 미지원 터미널에서는 Alt+Enter 로
+    // 줄바꿈할 수 있다 (ESC + CR 은 레거시에서도 구분됨).
+    if supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok()
+    {
+        guard.enhanced_keys = true;
+    }
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     // `Terminal::clear` 는 커서 위치를 조회한다. 가상 TTY 에서는 시간 초과로
@@ -297,8 +328,6 @@ where
     // `history_sources` 를 재사용한다 (최근이 앞에 정렬됨).
     let mut history_sources: Vec<String> = crate::completion::load_history_sources();
     let mut history_idx: Option<usize> = None;
-    // 멀티라인 입력 모드: 켜져 있으면 Shift+Enter 로 줄바꿈, Enter 로 전송.
-    let mut multiline = false;
 
     // 진행 중인 턴: 델타 수신 채널 + 작업 스레드 핸들.
     // `Some` 이면 응답 생성 중이며, TUI 루프가 채널을 폴링해 점진적으로 그린다.
@@ -348,13 +377,11 @@ where
 
         terminal.draw(|f| {
             let size = f.area();
-            // 슬래시 드롭다운이 열려 있으면 텍스트 드롭다운은 겹치지 않게 닫는다.
-            // (텍스트 자동완성 제거 후에는 슬래시 드롭다운만 존재)
-            let input_constraint = if multiline {
-                Constraint::Min(5)
-            } else {
-                Constraint::Length(3)
-            };
+            // 입력창 높이는 입력 줄 수에 따라 늘어난다 (테두리 2줄 포함).
+            // 제목 1 + 대화 최소 3 + 상태 1 을 남기고, 너무 커지지 않게 상한을 둔다.
+            let input_rows = input.split('\n').count() as u16;
+            let max_input_height = size.height.saturating_sub(5).clamp(3, INPUT_MAX_HEIGHT);
+            let input_constraint = Constraint::Length((input_rows + 2).clamp(3, max_input_height));
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -394,7 +421,7 @@ where
                 offset_from_bottom,
                 pending_turn.is_some(),
             );
-            draw_input(f, chunks[2], &input, cursor, multiline);
+            draw_input(f, chunks[2], &input, cursor);
             draw_completions(f, chunks[2], &completions, completion_idx);
             let total_in: u64 = lines.iter().map(|l| l.input_tokens).sum();
             let total_out: u64 = lines.iter().map(|l| l.output_tokens).sum();
@@ -512,6 +539,14 @@ where
                 offset_from_bottom = 0;
             }
             KeyCode::Enter => {
+                // Shift+Enter / Alt+Enter — 입력창 줄바꿈 (멀티라인 입력).
+                // 자동완성 선택보다 먼저 처리해, 드롭다운이 열려 있어도
+                // 줄바꿈 의도가 우선하게 한다.
+                if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT)
+                {
+                    insert_char(&mut input, &mut cursor, '\n');
+                    continue;
+                }
                 // 자동완성 드롭다운이 열려 있으면 Enter 로 선택.
                 if completion_active && !completions.is_empty() {
                     let item = completions[completion_idx.min(completions.len() - 1)].clone();
@@ -524,34 +559,8 @@ where
                 if pending_turn.is_some() {
                     continue;
                 }
-                // 멀티라인 모드: Shift+Enter (또는 Alt+Enter) 는 줄바꿈.
-                if multiline
-                    && (modifiers.contains(KeyModifiers::SHIFT)
-                        || modifiers.contains(KeyModifiers::ALT))
-                {
-                    insert_char(&mut input, &mut cursor, '\n');
-                    continue;
-                }
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
-                    continue;
-                }
-                // `/multiline` — 멀티라인 입력 모드 토글 (command_handler 미경유).
-                if trimmed == "/multiline" {
-                    multiline = !multiline;
-                    let msg = if multiline {
-                        "멀티라인 입력 모드 켜짐 — Shift+Enter 줄바꿈, Enter 전송".to_string()
-                    } else {
-                        "멀티라인 입력 모드 꺼짐".to_string()
-                    };
-                    lines.push(ChatLine {
-                        role: Role::Status,
-                        text: msg,
-                        ..ChatLine::default()
-                    });
-                    offset_from_bottom = 0;
-                    input.clear();
-                    cursor = 0;
                     continue;
                 }
                 input.clear();
@@ -607,33 +616,24 @@ where
                 turn_started_at = Some(Instant::now());
             }
             KeyCode::Backspace => {
-                if multiline && input.as_bytes().get(cursor) == Some(&b'\n') {
-                    // 멀티라인: 커서 위치의 줄바꿈을 한 번에 지운다 (줄 병합).
-                    input.replace_range(cursor..cursor + 1, "");
-                    continue;
-                }
                 delete_back(&mut input, &mut cursor);
-                if !multiline {
-                    update_completions(
-                        &mut completions,
-                        &mut completion_idx,
-                        &mut completion_active,
-                        &input,
-                        &slash_ctx,
-                    );
-                }
+                update_completions(
+                    &mut completions,
+                    &mut completion_idx,
+                    &mut completion_active,
+                    &input,
+                    &slash_ctx,
+                );
             }
             KeyCode::Delete => {
                 delete_fwd(&mut input, &mut cursor);
-                if !multiline {
-                    update_completions(
-                        &mut completions,
-                        &mut completion_idx,
-                        &mut completion_active,
-                        &input,
-                        &slash_ctx,
-                    );
-                }
+                update_completions(
+                    &mut completions,
+                    &mut completion_idx,
+                    &mut completion_active,
+                    &input,
+                    &slash_ctx,
+                );
             }
             KeyCode::Tab => {
                 // Tab: 자동완성 선택 항목 순환 (슬래시 드롭다운이 열려 있으면).
@@ -681,15 +681,13 @@ where
                     continue;
                 }
                 insert_char(&mut input, &mut cursor, c);
-                if !multiline {
-                    update_completions(
-                        &mut completions,
-                        &mut completion_idx,
-                        &mut completion_active,
-                        &input,
-                        &slash_ctx,
-                    );
-                }
+                update_completions(
+                    &mut completions,
+                    &mut completion_idx,
+                    &mut completion_active,
+                    &input,
+                    &slash_ctx,
+                );
             }
             KeyCode::PageUp => {
                 offset_from_bottom = offset_from_bottom.saturating_add(10);
@@ -700,6 +698,9 @@ where
             KeyCode::Up => {
                 if completion_active && !completions.is_empty() {
                     completion_idx = completion_idx.saturating_sub(1);
+                } else if input.contains('\n') {
+                    // 멀티라인 입력: ↑ 는 위 줄로 커서 이동.
+                    move_cursor_line(&input, &mut cursor, false);
                 } else if !history_sources.is_empty() {
                     // ↑: 빈 입력이든 아닌든 이전 프롬프트를 거슬러 올라간다.
                     history_idx = step_history(&history_sources, history_idx, true);
@@ -717,6 +718,9 @@ where
             KeyCode::Down => {
                 if completion_active && !completions.is_empty() {
                     completion_idx = (completion_idx + 1) % completions.len();
+                } else if input.contains('\n') {
+                    // 멀티라인 입력: ↓ 는 아래 줄로 커서 이동.
+                    move_cursor_line(&input, &mut cursor, true);
                 } else if history_idx.is_some() {
                     // ↓: 최신 방향으로 내려가다 끝나면 입력창 비움.
                     history_idx = step_history(&history_sources, history_idx, false);
@@ -737,7 +741,7 @@ where
             {
                 if cursor > 0 {
                     cursor -= 1;
-                } else if !multiline {
+                } else {
                     // 입력 경계에서 ← 는 대화 스크롤 (기존 동작 유지).
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
                 }
@@ -748,7 +752,7 @@ where
             {
                 if cursor < input.len() {
                     cursor += 1;
-                } else if !multiline {
+                } else {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
             }
@@ -757,7 +761,7 @@ where
                 if modifiers.contains(KeyModifiers::ALT)
                     || modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                if !move_cursor_word(&input, &mut cursor, false) && !multiline {
+                if !move_cursor_word(&input, &mut cursor, false) {
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
                 }
             }
@@ -765,16 +769,17 @@ where
                 if modifiers.contains(KeyModifiers::ALT)
                     || modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                if !move_cursor_word(&input, &mut cursor, true) && !multiline {
+                if !move_cursor_word(&input, &mut cursor, true) {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
             }
             // 라인 시작/끝: Home/End (Ctrl+A/E 는 위 Char arm에서 처리).
+            // 멀티라인이면 커서가 속한 줄의 시작/끝으로 이동한다.
             KeyCode::Home => {
-                cursor = 0;
+                cursor = line_start(&input, cursor);
             }
             KeyCode::End => {
-                cursor = input.len();
+                cursor = line_end(&input, cursor);
             }
             KeyCode::Esc => {
                 // Esc: 자동완성 드롭다운 취소.
@@ -947,6 +952,62 @@ fn move_cursor_word(input: &str, cursor: &mut usize, forward: bool) -> bool {
         }
         false
     }
+}
+
+/// 커서가 속한 줄의 시작 바이트 오프셋을 반환한다 (첫 줄이면 0).
+fn line_start(input: &str, cursor: usize) -> usize {
+    let c = cursor.min(input.len());
+    input[..c].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// 커서가 속한 줄의 끝 바이트 오프셋을 반환한다 (`\n` 직전, 마지막 줄이면
+/// 문자열 끝).
+fn line_end(input: &str, cursor: usize) -> usize {
+    let c = cursor.min(input.len());
+    input[c..].find('\n').map(|i| c + i).unwrap_or(input.len())
+}
+
+/// 문자열의 표시 폭 (ASCII 1, 그 외 2).
+fn text_width(s: &str) -> usize {
+    s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+}
+
+/// `start..end` 구간에서 표시 폭 `col` 에 해당하는 바이트 오프셋을 찾는다.
+/// 폭을 넘어서는 문자 직전에서 멈춰 열을 맞춘다.
+fn byte_at_col(input: &str, start: usize, end: usize, col: usize) -> usize {
+    let mut w = 0usize;
+    for (i, ch) in input[start..end].char_indices() {
+        let cw = if ch.is_ascii() { 1 } else { 2 };
+        if w + cw > col {
+            return start + i;
+        }
+        w += cw;
+    }
+    end
+}
+
+/// 커서를 위/아래 줄의 같은 표시 열로 이동한다. 이동했으면 `true`.
+/// 첫 줄에서 위, 마지막 줄에서 아래로 가면 `false`.
+fn move_cursor_line(input: &str, cursor: &mut usize, down: bool) -> bool {
+    let start = line_start(input, *cursor);
+    let col = text_width(&input[start..*cursor]);
+    if down {
+        let end = line_end(input, *cursor);
+        if end >= input.len() {
+            return false;
+        }
+        let next_start = end + 1;
+        let next_end = line_end(input, next_start);
+        *cursor = byte_at_col(input, next_start, next_end, col);
+    } else {
+        if start == 0 {
+            return false;
+        }
+        let prev_end = start - 1; // 이전 줄 끝의 '\n' 위치
+        let prev_start = line_start(input, prev_end);
+        *cursor = byte_at_col(input, prev_start, prev_end, col);
+    }
+    true
 }
 
 /// 스패너 스타일을 보존하며 `width` 열에 맞춰 줄바꿈한다.
@@ -1295,53 +1356,44 @@ fn push_tool_event(lines: &mut Vec<ChatLine>, ev: crate::llm::ToolEvent) {
 
 /// 입력창 렌더링. `cursor` 는 바이트 인덱스이며, 그 위치의 문자를 역색
 /// 스팬으로 그려 커서를 표시한다 (끝이면 빈 역색 스팬).
-/// `multiline` 이면 입력을 줄 단위로 나눠 여러 줄로 렌더하고, 커서는
-/// `cursor` 가 속한 라인에만 표시한다.
-fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize, multiline: bool) {
-    let title = if multiline {
-        "입력 (멀티라인 — Shift+Enter 줄바꿈 · Enter 전송 · /multiline 꺼짐)"
-    } else {
-        "입력 (Enter 전송 · ↑↓ 히스토리 · Tab 자동완성 · Ctrl+T 생각 · Ctrl+Q 종료)"
-    };
+/// 입력에 줄바꿈이 있으면 여러 줄로 렌더하고, 커서가 속한 줄이 보이도록
+/// 세로 스크롤한다.
+fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
+    let title = "입력 (Enter 전송 · Shift+Enter 줄바꿈 · ↑↓ 히스토리 · Tab 자동완성 · Ctrl+T 생각 · Ctrl+Q 종료)";
     // 커서 표시: [cursor 앞][커서 문자(역색)][cursor 뒤]
     let inv = Style::default().add_modifier(Modifier::REVERSED);
-    let lines: Vec<Line> = if multiline {
-        let mut off = 0usize;
-        input
-            .split('\n')
-            .map(|l| {
-                let lstart = off;
-                let lend = off + l.len();
-                off += l.len() + 1; // '\n' 바이트 포함
-                let cc = cursor.min(input.len());
-                if cc >= lstart && cc <= lend {
-                    let (before, cur, after) = split_cursor(l, cc - lstart);
-                    Line::from(vec![
-                        Span::raw(before),
-                        Span::styled(cur, inv),
-                        Span::raw(after),
-                    ])
-                } else {
-                    Line::from(Span::raw(l))
-                }
-            })
-            .collect()
+    let cc = cursor.min(input.len());
+    let mut off = 0usize;
+    let lines: Vec<Line> = input
+        .split('\n')
+        .map(|l| {
+            let lstart = off;
+            let lend = off + l.len();
+            off += l.len() + 1; // '\n' 바이트 포함
+            if cc >= lstart && cc <= lend {
+                let (before, cur, after) = split_cursor(l, cc - lstart);
+                Line::from(vec![
+                    Span::raw(before),
+                    Span::styled(cur, inv),
+                    Span::raw(after),
+                ])
+            } else {
+                Line::from(Span::raw(l))
+            }
+        })
+        .collect();
+    // 커서가 속한 줄이 스크롤 창 안에 들어오도록 오프셋을 계산한다.
+    let cursor_line = input[..cc].matches('\n').count();
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let scroll = if inner_h == 0 {
+        0
     } else {
-        let (before, cur, after) = split_cursor(input, cursor.min(input.len()));
-        let spans = vec![
-            Span::raw(before),
-            Span::styled(cur, inv),
-            Span::raw(after),
-        ];
-        vec![Line::from(spans)]
+        cursor_line.saturating_sub(inner_h - 1)
     };
     let p = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
-        .wrap(Wrap { trim: false });
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
     f.render_widget(p, area);
 }
 
@@ -1688,6 +1740,59 @@ mod tests {
         assert!(move_cursor_word(&s, &mut c, true));
         assert_eq!(c, 13);
         assert!(!move_cursor_word(&s, &mut c, true));
+    }
+
+    /// line_start/line_end: 커서가 속한 줄의 경계를 찾는다.
+    #[test]
+    fn line_bounds_follow_cursor() {
+        let s = "abc\ndef\ngh";
+        // 첫 줄.
+        assert_eq!(line_start(s, 0), 0);
+        assert_eq!(line_end(s, 1), 3);
+        // 둘째 줄.
+        assert_eq!(line_start(s, 5), 4);
+        assert_eq!(line_end(s, 4), 7);
+        // 마지막 줄.
+        assert_eq!(line_start(s, 9), 8);
+        assert_eq!(line_end(s, 8), 10);
+    }
+
+    /// move_cursor_line: 위/아래 줄로 같은 표시 열을 유지하며 이동한다.
+    #[test]
+    fn vertical_cursor_movement() {
+        let s = "abc\ndef\ngh";
+        let mut c = 1; // 첫 줄 col 1 (a 와 b 사이)
+        assert!(move_cursor_line(s, &mut c, true));
+        assert_eq!(c, 5); // 둘째 줄 col 1 (d 와 e 사이)
+        assert!(move_cursor_line(s, &mut c, true));
+        assert_eq!(c, 9); // 마지막 줄 col 1 (g 와 h 사이)
+        // 마지막 줄에서 아래로는 이동하지 않는다.
+        assert!(!move_cursor_line(s, &mut c, true));
+        // 위로 올라가면 열이 유지된다.
+        assert!(move_cursor_line(s, &mut c, false));
+        assert_eq!(c, 5);
+        assert!(move_cursor_line(s, &mut c, false));
+        assert_eq!(c, 1);
+        // 첫 줄에서 위로는 이동하지 않는다.
+        assert!(!move_cursor_line(s, &mut c, false));
+    }
+
+    /// move_cursor_line: 한글은 표시 폭 2 기준으로 열을 맞춘다.
+    /// 짧은 줄로 이동하면 줄 끝으로 클램프된다.
+    #[test]
+    fn vertical_cursor_movement_wide_chars() {
+        let s = "한글\nabcd";
+        let mut c = 3; // 첫 줄 '한' 뒤 (표시 폭 2)
+        assert!(move_cursor_line(s, &mut c, true));
+        assert_eq!(c, 9); // 둘째 줄 표시 폭 2 → 'b' 뒤
+        // 마지막 줄에서 위로 올라가면 표시 폭 2 위치(한글 뒤)로 복귀.
+        assert!(move_cursor_line(s, &mut c, false));
+        assert_eq!(c, 3);
+        // 짧은 줄 "ij" 로 이동하면 줄 끝으로 클램프.
+        let s2 = "abcd\nij";
+        let mut c2 = 4; // 첫 줄 끝, col 4
+        assert!(move_cursor_line(s2, &mut c2, true));
+        assert_eq!(c2, s2.len());
     }
 
     /// set_input: 입력 교체 + 커서 끝 이동.
