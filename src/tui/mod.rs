@@ -55,7 +55,7 @@ pub struct ChatLine {
     pub text: String,
     /// 모델 추론 중간 생각 (응답 생성 중에만 표시, 완료 시 접혀서 저장).
     pub reasoning_content: String,
-    /// reasoning 접기/펼침 상태 (`t` 키로 토글, 기본 접힘).
+    /// reasoning 접기/펼침 상태 (`Ctrl+T` 로 토글, 완료 시 기본 접힘).
     pub reasoning_expanded: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -313,22 +313,24 @@ where
             while let Ok(delta) = rx.try_recv() {
                 got = true;
                 if let Some(text) = delta.content {
-                    if let Some(last) = lines.last_mut() {
-                        if last.role == Role::Assistant {
-                            if !text.is_empty() {
-                                last.text.push_str(&text);
-                                last.bump_generation();
-                            }
+                    if !text.is_empty() {
+                        // 도구 호출 줄이 뒤에 끼어 있어도 마지막 Assistant 줄에
+                        // 누적한다 (list 마지막이 Tool/Status 일 수 있음).
+                        if let Some(last) =
+                            lines.iter_mut().rev().find(|l| l.role == Role::Assistant)
+                        {
+                            last.text.push_str(&text);
+                            last.bump_generation();
                         }
                     }
                 }
                 if let Some(think) = delta.reasoning_content {
-                    if let Some(last) = lines.last_mut() {
-                        if last.role == Role::Assistant {
-                            if !think.is_empty() {
-                                last.reasoning_content.push_str(&think);
-                                last.bump_generation();
-                            }
+                    if !think.is_empty() {
+                        if let Some(last) =
+                            lines.iter_mut().rev().find(|l| l.role == Role::Assistant)
+                        {
+                            last.reasoning_content.push_str(&think);
+                            last.bump_generation();
                         }
                     }
                 }
@@ -383,7 +385,13 @@ where
                 &options.model,
                 progress,
             );
-            draw_scroll(f, chunks[1], &mut lines, offset_from_bottom);
+            draw_scroll(
+                f,
+                chunks[1],
+                &mut lines,
+                offset_from_bottom,
+                pending_turn.is_some(),
+            );
             draw_input(f, chunks[2], &input, cursor, multiline);
             draw_completions(f, chunks[2], &completions, completion_idx);
             let total_in: u64 = lines.iter().map(|l| l.input_tokens).sum();
@@ -400,8 +408,13 @@ where
             );
         })?;
 
-        // 진행 중 턴이 끝났는지 확인한다. 끝났으면 최종 결과를 처리한다.
-        if let Some((_, handle)) = pending_turn.take() {
+        // 진행 중 턴이 끝났는지 확인한다. 아직 실행 중이면 join 하지 않고
+        // 계속 델타를 폴링해 점진적으로 그린다 (`join` 은 완료 후에만).
+        let turn_finished = pending_turn
+            .as_ref()
+            .is_some_and(|(_, handle)| handle.is_finished());
+        if turn_finished {
+            let (_, handle) = pending_turn.take().expect("turn_finished implies Some");
             turn_started_at = None;
             match handle.join() {
                 Ok(Ok(turn)) => {
@@ -629,8 +642,9 @@ where
                 }
             }
             // 가장 마지막 Assistant 줄의 reasoning 접기/펼침 토글.
-            // `Char(c)` arm 보다 앞에 두면 't' 가 입력창에 들어가지 않는다.
-            KeyCode::Char('t') if !modifiers.contains(KeyModifiers::CONTROL) => {
+            // 반드시 Ctrl+T 로만 발동해야 한다 — 맨 `t` 를 잡으면 입력창에
+            // 't' 를 입력할 수 없게 된다.
+            KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(last) = lines.iter_mut().rev().find(|l| l.role == Role::Assistant) {
                     last.reasoning_expanded = !last.reasoning_expanded;
                 }
@@ -978,11 +992,19 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 ///   보관한다. 같은 너비·내용이면 래핑 없이 캐시에서 그대로 재사용한다.
 /// - generation 이 바뀌면(스트리밍 수신) 이전 렌더의 공통 접두까지의 래핑
 ///   결과만 재사용하고 새 도착분(꼬리)만 재래핑한다 (`frozen_pre_wrap_count`).
-fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &mut [ChatLine], offset_from_bottom: usize) {
+fn draw_scroll(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    lines: &mut [ChatLine],
+    offset_from_bottom: usize,
+    running: bool,
+) {
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let text_width = inner_width.max(1);
     let mut text_lines: Vec<Line> = Vec::new();
-    for line in lines.iter_mut() {
+    // 진행 중 턴의 "생각 중…" 헤더는 마지막 Assistant 줄에만 붙인다.
+    let last_assistant_idx = lines.iter().rposition(|l| l.role == Role::Assistant);
+    for (idx, line) in lines.iter_mut().enumerate() {
         let prefix = match line.role {
             Role::User => "▶ ",
             Role::Assistant => "◀ ",
@@ -995,67 +1017,66 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &mut [ChatLine], offse
             Role::Tool => Style::default().fg(Color::Yellow),
             Role::Status => Style::default().fg(Color::DarkGray),
         };
-        // Assistant 응답은 마크다운 렌더링을 적용한다 (코드블록·인라인 코드·
-        // 테이블·리스트·헤딩). User/Status 는 기존 평문 래핑을 유지한다.
-        // 접두/인덴트 스팬을 rendered 라인에 직접 적용해, 캐시 비교·재래핑이
-        // 라인 단위에서 자기 완결적으로 되도록 한다.
-        let rendered: Vec<Line<'static>> = if line.role == Role::Assistant {
-            let blocks = crate::render::parse(&line.text);
-            let mut rendered: Vec<Line<'static>> = Vec::new();
-            for (i, rline) in crate::render::render_lines(&blocks).iter().enumerate() {
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                if i == 0 {
-                    spans.push(Span::styled(prefix, style));
-                } else {
-                    spans.push(Span::raw("  ".to_string()));
-                }
-                spans.extend(rline.spans.iter().cloned());
-                rendered.push(Line::from(spans));
+
+        // 메시지 사이에 한 줄을 띄워 붙어 보이지 않게 한다.
+        if !text_lines.is_empty() {
+            let last_blank = text_lines
+                .last()
+                .map(|l| l.spans.iter().all(|s| s.content.trim().is_empty()))
+                .unwrap_or(true);
+            if !last_blank {
+                text_lines.push(Line::from(""));
             }
-            rendered
-        } else {
-            // 평문: 한 원문 줄 = 한 렌더 라인 (prefix 스타일 스팬 포함).
-            line.text
-                .split('\n')
-                .map(|raw| {
-                    Line::from(vec![
-                        Span::styled(prefix, style),
-                        Span::styled(raw.to_string(), style),
-                    ])
-                })
-                .collect()
-        };
-        line.render_cache.append_wrapped(&mut text_lines, &rendered, text_width, line.generation, false);
-        // 모델 생각(reasoning) — 생성 중에는 펼쳐서 실시간 표시하고, 완료 후엔
-        // "🤔 생각" 한 줄로 접는다. `t` 키로 접기/펼침 토글.
-        if !line.reasoning_content.trim().is_empty() {
-            let dim = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM | Modifier::ITALIC);
-            let reasoning: Vec<Line<'static>> = if line.reasoning_expanded {
-                let blocks = crate::render::parse(&line.reasoning_content);
-                crate::render::render_lines(&blocks)
-                    .iter()
-                    .map(|rline| {
-                        Line::from(
-                            rline
-                                .spans
-                                .iter()
-                                .map(|s| Span::styled(s.content.clone(), dim))
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect()
-            } else {
-                vec![Line::from(vec![Span::styled(
-                    format!("🤔 생각 ({}자) — 펼치기", line.reasoning_content.chars().count()),
-                    Style::default().fg(Color::DarkGray),
-                )])]
-            };
-            line
-                .reasoning_cache
-                .append_wrapped(&mut text_lines, &reasoning, text_width, line.generation, line.reasoning_expanded);
         }
+
+        // Assistant 줄: 모델은 생각한 뒤 답하므로 reasoning 을 본문보다 먼저 그린다.
+        // 본문이 아직 비어 있어도(생각만 나오는 중) `◀` 빈 줄은 만들지 않는다 —
+        // 진행 상태는 제목줄 스피너와 생각 헤더가 표시한다.
+        if line.role == Role::Assistant {
+            let is_running =
+                running && Some(idx) == last_assistant_idx && line.text.trim().is_empty();
+            if !line.reasoning_content.trim().is_empty() {
+                let reasoning = render_thinking(line, is_running);
+                line.reasoning_cache.append_wrapped(
+                    &mut text_lines,
+                    &reasoning,
+                    text_width,
+                    line.generation,
+                    line.reasoning_expanded,
+                );
+            }
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            let rendered = render_assistant_markdown(&line.text, prefix, style);
+            line.render_cache.append_wrapped(
+                &mut text_lines,
+                &rendered,
+                text_width,
+                line.generation,
+                false,
+            );
+            continue;
+        }
+
+        // 평문: 한 원문 줄 = 한 렌더 라인 (prefix 스타일 스팬 포함).
+        let rendered: Vec<Line<'static>> = line
+            .text
+            .split('\n')
+            .map(|raw| {
+                Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(raw.to_string(), style),
+                ])
+            })
+            .collect();
+        line.render_cache.append_wrapped(
+            &mut text_lines,
+            &rendered,
+            text_width,
+            line.generation,
+            false,
+        );
     }
 
     let scroll = scroll_from_bottom(text_lines.len(), area.height, offset_from_bottom);
@@ -1064,6 +1085,85 @@ fn draw_scroll(f: &mut ratatui::Frame, area: Rect, lines: &mut [ChatLine], offse
         .scroll((scroll as u16, 0))
         .block(Block::default().padding(ratatui::widgets::Padding::new(1, 1, 0, 0)));
     f.render_widget(para, area);
+}
+
+/// 마크다운 블록 앞뒤의 빈 줄(Blank)을 제거한다.
+///
+/// 스트리밍 중 `parse` 는 문단 경계마다 `Blank` 를 만드는데, 맨 앞 `Blank` 가
+/// 있으면 `◀ ` 접두가 내용 없이 빈 줄에 붙어 본문이 한 줄 밀려 보인다.
+fn trim_blank_blocks(mut blocks: Vec<crate::render::Block>) -> Vec<crate::render::Block> {
+    while matches!(blocks.first(), Some(crate::render::Block::Blank)) {
+        blocks.remove(0);
+    }
+    while matches!(blocks.last(), Some(crate::render::Block::Blank)) {
+        blocks.pop();
+    }
+    blocks
+}
+
+/// Assistant 본문을 마크다운으로 렌더링한다. 첫 줄에 `◀ ` 접두를, 이어지는
+/// 줄에는 같은 폭의 들여쓰기를 붙여 접두 아래로 정렬한다.
+fn render_assistant_markdown(text: &str, prefix: &str, style: Style) -> Vec<Line<'static>> {
+    let blocks = trim_blank_blocks(crate::render::parse(text));
+    if blocks.is_empty() {
+        return vec![Line::from(Span::styled(prefix.to_string(), style))];
+    }
+    let mut rendered: Vec<Line<'static>> = Vec::new();
+    for (i, rline) in crate::render::render_lines(&blocks).iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if i == 0 {
+            spans.push(Span::styled(prefix.to_string(), style));
+        } else {
+            spans.push(Span::raw("  ".to_string()));
+        }
+        spans.extend(rline.spans.iter().cloned());
+        rendered.push(Line::from(spans));
+    }
+    rendered
+}
+
+/// 모델 생각(reasoning) 블록을 grok-build `ThinkingBlock` 스타일로 렌더링한다.
+///
+/// - 헤더: 진행 중이면 `💭 생각 중… (N자)`, 완료 후면 `💭 생각 (N자)`.
+/// - 접힘 상태에는 `Ctrl+T 펼치기` 힌트를 덧붙여 펼치는 방법을 화면에 노출한다.
+/// - 펼침 상태에서만 본문을 dim·italic 으로 그린다.
+fn render_thinking(line: &ChatLine, is_running: bool) -> Vec<Line<'static>> {
+    let n = line.reasoning_content.chars().count();
+    let header_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
+    let header = if is_running {
+        format!("💭 생각 중… ({n}자)")
+    } else {
+        format!("💭 생각 ({n}자)")
+    };
+    let hint = if line.reasoning_expanded {
+        "  — Ctrl+T 접기"
+    } else {
+        "  — Ctrl+T 펼치기"
+    };
+    let mut out: Vec<Line<'static>> = vec![Line::from(vec![
+        Span::styled(header, header_style),
+        Span::styled(hint.to_string(), hint_style),
+    ])];
+    if line.reasoning_expanded {
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM | Modifier::ITALIC);
+        let blocks = trim_blank_blocks(crate::render::parse(&line.reasoning_content));
+        for rline in crate::render::render_lines(&blocks) {
+            let mut spans: Vec<Span<'static>> = vec![Span::raw("  ".to_string())];
+            spans.extend(
+                rline
+                    .spans
+                    .iter()
+                    .map(|s| Span::styled(s.content.clone(), dim)),
+            );
+            out.push(Line::from(spans));
+        }
+    }
+    out
 }
 
 /// 하단 고정 스크롤 오프셋 계산.
@@ -1175,7 +1275,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize, mu
     let title = if multiline {
         "입력 (멀티라인 — Shift+Enter 줄바꿈 · Enter 전송 · /multiline 꺼짐)"
     } else {
-        "입력 (Enter 전송 · ↑/↓ 히스토리 · Tab 자동완성 · Ctrl+S 저장 · Ctrl+Q 종료)"
+        "입력 (Enter 전송 · ↑↓ 히스토리 · Tab 자동완성 · Ctrl+T 생각 · Ctrl+Q 종료)"
     };
     // 커서 표시: [cursor 앞][커서 문자(역색)][cursor 뒤]
     let inv = Style::default().add_modifier(Modifier::REVERSED);
@@ -1733,5 +1833,88 @@ mod tests {
         assert_eq!(out2, fresh);
         // 너비를 넓히면 래핑 줄 수가 줄어든다.
         assert!(out2.len() < out1.len());
+    }
+
+    // ── 생각(reasoning) 렌더링 ─────────────────────────────────────────────
+
+    /// 앞뒤 Blank 블록을 제거해 접두가 빈 줄에 붙지 않게 한다.
+    #[test]
+    fn trim_blank_blocks_strips_edges() {
+        let blocks = crate::render::parse("\n본문\n");
+        assert_eq!(blocks.first(), Some(&crate::render::Block::Blank));
+        let trimmed = trim_blank_blocks(blocks);
+        assert_eq!(trimmed.len(), 1);
+        assert!(matches!(trimmed[0], crate::render::Block::Paragraph(_)));
+    }
+
+    /// Assistant 마크다운은 첫 줄에 `◀ ` 접두가 붙고 선행 빈 줄이 없다.
+    #[test]
+    fn assistant_markdown_prefix_on_first_line() {
+        let rendered = render_assistant_markdown("\n첫 문단\n\n둘째 문단", "◀ ", Style::default());
+        let first: String = rendered[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(first, "◀ 첫 문단");
+        // 두 번째 문단 줄은 2칸 들여쓰기로 정렬된다.
+        let second: String = rendered
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|t| t.contains("둘째"))
+            .expect("둘째 문단");
+        assert!(second.starts_with("  둘째"), "{second:?}");
+    }
+
+    fn thinking_line(expanded: bool) -> ChatLine {
+        ChatLine {
+            role: Role::Assistant,
+            reasoning_content: "생각한 내용".to_string(),
+            reasoning_expanded: expanded,
+            ..ChatLine::default()
+        }
+    }
+
+    /// 접힌 생각은 헤더 + 펼치기 힌트 한 줄만 보여준다 (본문 미노출).
+    #[test]
+    fn collapsed_thinking_shows_expand_hint_only() {
+        let out = render_thinking(&thinking_line(false), false);
+        assert_eq!(out.len(), 1);
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("💭 생각"), "{text:?}");
+        assert!(text.contains("Ctrl+T 펼치기"), "{text:?}");
+        assert!(!text.contains("생각한 내용"), "{text:?}");
+    }
+
+    /// 펼친 생각은 헤더 아래에 본문을 dim·italic 으로 보여준다.
+    #[test]
+    fn expanded_thinking_shows_body() {
+        let out = render_thinking(&thinking_line(true), false);
+        assert!(out.len() > 1);
+        let all: String = out
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("— Ctrl+T 접기"), "{all:?}");
+        assert!(all.contains("생각한 내용"), "{all:?}");
+    }
+
+    /// 진행 중이면 헤더가 "생각 중…" 으로 바뀐다.
+    #[test]
+    fn running_thinking_header() {
+        let out = render_thinking(&thinking_line(false), true);
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("생각 중…"), "{text:?}");
     }
 }
