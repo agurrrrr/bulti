@@ -11,6 +11,44 @@ use std::collections::HashSet;
 /// 히스토리·세션에서 수집한 프롬프트 문자열 배열.
 pub type CompletionSource = Vec<String>;
 
+/// 슬래시 커맨드 인자 자동완성용 동적 컨텍스트를 수집한다.
+///
+/// - 엔드포인트 이름: `config.toml` `[endpoints.*]` 키
+/// - 모델: 각 엔드포인트의 `model` + 최근 세션 턴에 기록된 `model` (중복 제거)
+/// - MCP 서버 이름: `config.toml` `[mcp.*]` 키
+///
+/// 설정·세션을 못 열면 해당 목록은 빈 채로 반환한다 (자동완성은 최선 노력).
+pub fn load_slash_context() -> crate::slash::CompletionContext {
+    let mut ctx = crate::slash::CompletionContext::default();
+
+    if let Ok(cfg) = crate::config::Config::load() {
+        ctx.endpoints = cfg.endpoints.keys().cloned().collect();
+        ctx.mcp = cfg.mcp.keys().cloned().collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        for ep in cfg.endpoints.values() {
+            if !ep.model.is_empty() && seen.insert(ep.model.clone()) {
+                ctx.models.push(ep.model.clone());
+            }
+        }
+    }
+
+    // 세션에서 과거 사용 모델을 보강한다 (엔드포인트 설정이 바뀌어도 후보 유지).
+    if let Ok(metas) = crate::session::list() {
+        let mut seen: HashSet<String> = ctx.models.iter().cloned().collect();
+        for meta in metas.iter().take(20) {
+            if let Ok(s) = crate::session::load(&meta.id) {
+                for t in s.turns {
+                    if !t.model.is_empty() && seen.insert(t.model.clone()) {
+                        ctx.models.push(t.model.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    ctx
+}
+
 /// history DB + 세션 파일에서 프롬프트 후보를 수집한다.
 ///
 /// - history DB `runs.prompt` (최근 200개)

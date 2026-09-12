@@ -290,6 +290,8 @@ where
     // 자동완성 드롭다운이 열렸을 때 방향키가 스크롤 대신 선택에 쓰이도록
     // 현재 드롭다운이 열려 있는지 별도로 추적한다.
     let mut completion_active = false;
+    // 인자 자동완성 후보 (모델·엔드포인트·MCP 이름). 시작 시 한 번만 수집한다.
+    let slash_ctx = crate::completion::load_slash_context();
 
     // 프롬프트 히스토리 탐색 상태 (↑/↓ 키). 히스토리 후보를 미리 로드해 두고
     // `history_sources` 를 재사용한다 (최근이 앞에 정렬됨).
@@ -612,13 +614,25 @@ where
                 }
                 delete_back(&mut input, &mut cursor);
                 if !multiline {
-                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_completions(
+                        &mut completions,
+                        &mut completion_idx,
+                        &mut completion_active,
+                        &input,
+                        &slash_ctx,
+                    );
                 }
             }
             KeyCode::Delete => {
                 delete_fwd(&mut input, &mut cursor);
                 if !multiline {
-                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_completions(
+                        &mut completions,
+                        &mut completion_idx,
+                        &mut completion_active,
+                        &input,
+                        &slash_ctx,
+                    );
                 }
             }
             KeyCode::Tab => {
@@ -632,7 +646,13 @@ where
                         completions.clear();
                         completion_active = false;
                     } else {
-                        update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                        update_completions(
+                            &mut completions,
+                            &mut completion_idx,
+                            &mut completion_active,
+                            &input,
+                            &slash_ctx,
+                        );
                         if completions.len() == 1 {
                             set_input(&mut input, &mut cursor, completions[0].insert.clone());
                             completions.clear();
@@ -662,7 +682,13 @@ where
                 }
                 insert_char(&mut input, &mut cursor, c);
                 if !multiline {
-                    update_completions(&mut completions, &mut completion_idx, &mut completion_active, &input);
+                    update_completions(
+                        &mut completions,
+                        &mut completion_idx,
+                        &mut completion_active,
+                        &input,
+                        &slash_ctx,
+                    );
                 }
             }
             KeyCode::PageUp => {
@@ -1362,14 +1388,18 @@ fn draw_completions(
 
 /// 일반 텍스트(히스토리·세션) 자동완성 드롭다운 렌더링.
 /// `/` 입력 시 자동완성 상태를 갱신한다. `/` 가 아니면 드롭다운을 닫는다.
+///
+/// `ctx` 는 `/model`·`/endpoint`·`/mcp` 의 인자 후보(모델·엔드포인트·MCP 이름)를
+/// 담는다. 커맨드명 자동완성에는 쓰이지 않으므로 입력이 인자 단계가 아니면 무시된다.
 fn update_completions(
     completions: &mut Vec<crate::slash::Suggestion>,
     idx: &mut usize,
     active: &mut bool,
     input: &str,
+    ctx: &crate::slash::CompletionContext,
 ) {
-    if let Some(query) = input.strip_prefix('/') {
-        let mut next = crate::slash::suggest(query);
+    if input.starts_with('/') {
+        let mut next = crate::slash::suggest_with(input, ctx);
         next.dedup_by(|a, b| a.insert == b.insert);
         *completions = next;
         *idx = 0;
@@ -1691,10 +1721,27 @@ mod tests {
         let mut completions = Vec::new();
         let mut idx = 0usize;
         let mut active = false;
-        update_completions(&mut completions, &mut idx, &mut active, "/");
+        let ctx = crate::slash::CompletionContext::default();
+        update_completions(&mut completions, &mut idx, &mut active, "/", &ctx);
         assert!(active);
         assert!(completions.iter().any(|c| c.insert == "/exit"));
         assert!(completions.iter().any(|c| c.insert == "/model"));
+    }
+
+    /// 인자 단계(`/model `)에서는 컨텍스트의 모델 후보가 제안된다.
+    #[test]
+    fn update_completions_suggests_model_args() {
+        let mut completions = Vec::new();
+        let mut idx = 0usize;
+        let mut active = false;
+        let ctx = crate::slash::CompletionContext {
+            models: vec!["qwen3-32b".to_string()],
+            ..Default::default()
+        };
+        update_completions(&mut completions, &mut idx, &mut active, "/model ", &ctx);
+        assert!(active);
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].insert, "/model qwen3-32b");
     }
 
     /// `/` 가 아닌 입력은 드롭다운을 닫는다.
@@ -1707,7 +1754,8 @@ mod tests {
         }];
         let mut idx = 0usize;
         let mut active = true;
-        update_completions(&mut completions, &mut idx, &mut active, "hello");
+        let ctx = crate::slash::CompletionContext::default();
+        update_completions(&mut completions, &mut idx, &mut active, "hello", &ctx);
         assert!(!active);
         assert!(completions.is_empty());
     }

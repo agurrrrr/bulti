@@ -22,7 +22,7 @@ use std::time::Instant;
 use super::ChatArgs;
 use crate::agent::handoff::{build_new_segment_prompt, HandoffDepthGuard};
 use crate::agent::loop_::{run_segment, SegmentParams, SegmentStatus};
-use crate::config::{Config, EndpointConfig};
+use crate::config::{Config, EndpointConfig, McpConfig};
 use crate::history;
 use crate::llm::LlmClient;
 use crate::mcp::McpManager;
@@ -570,8 +570,10 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                 }
                 "model" => {
                     if args_str.is_empty() {
+                        let current = endpoint_cmd.lock().unwrap().model.clone();
+                        let cfg_guard = cfg_cmd.lock().unwrap();
                         crate::tui::CommandResult {
-                            message: "사용법: /model <모델명> [low|medium|high]".to_string(),
+                            message: available_models_text(&cfg_guard, &current),
                             exit: false,
                         }
                     } else {
@@ -639,6 +641,20 @@ pub fn run(args: ChatArgs, cfg: &mut Config) -> Result<i32, Box<dyn std::error::
                             message: format!("reasoning effort 를 '{e}' (으)로 설정했습니다."),
                             exit: false,
                         }
+                    }
+                }
+                "endpoint" => {
+                    let cfg_guard = cfg_cmd.lock().unwrap();
+                    crate::tui::CommandResult {
+                        message: endpoint_text(&cfg_guard, &ep_name_cmd, args_str),
+                        exit: false,
+                    }
+                }
+                "mcp" => {
+                    let cfg_guard = cfg_cmd.lock().unwrap();
+                    crate::tui::CommandResult {
+                        message: mcp_text(&cfg_guard, args_str),
+                        exit: false,
                     }
                 }
                 "session-info" => {
@@ -976,7 +992,7 @@ async fn chat_loop(
                 "model" => {
                     // `/model <name> [effort]` — 모델 전환 + 선택적 effort 설정.
                     if args_str.is_empty() {
-                        println!("{}", color("사용법: /model <모델명> [low|medium|high]"));
+                        println!("{}", color(&available_models_text(cfg, &endpoint.model)));
                         continue;
                     }
                     let mut parts = args_str.split_whitespace();
@@ -1018,6 +1034,14 @@ async fn chat_loop(
                         tracing::error!("설정 저장 실패: {e}");
                     }
                     println!("{}", color(&format!("reasoning effort 를 '{e}' (으)로 설정했습니다.")));
+                    continue;
+                }
+                "endpoint" => {
+                    println!("{}", color(&endpoint_text(cfg, endpoint_name, args_str)));
+                    continue;
+                }
+                "mcp" => {
+                    println!("{}", color(&mcp_text(cfg, args_str)));
                     continue;
                 }
                 "session-info" => {
@@ -1506,6 +1530,143 @@ fn usage_text(session: &session::Session, endpoint: &EndpointConfig) -> String {
     out
 }
 
+/// `/model`(무인자) — 사용 가능한 모델 목록 텍스트. 현재 모델을 표시한다.
+fn available_models_text(cfg: &Config, current: &str) -> String {
+    let mut out = String::from("사용 가능한 모델 (설정된 엔드포인트 기준):");
+    let mut seen: Vec<&str> = Vec::new();
+    if !current.is_empty() {
+        seen.push(current);
+    }
+    for ep in cfg.endpoints.values() {
+        if !ep.model.is_empty() && !seen.contains(&ep.model.as_str()) {
+            seen.push(&ep.model);
+        }
+    }
+    if seen.is_empty() {
+        out.push_str("\n  (모델이 설정되지 않았습니다 — /model <모델명> 으로 지정)");
+        return out;
+    }
+    for m in seen {
+        let mark = if m == current { " (현재)" } else { "" };
+        out.push_str(&format!("\n  {m}{mark}"));
+    }
+    out.push_str("\n사용법: /model <모델명> [low|medium|high]");
+    out
+}
+
+/// `/endpoint` — 엔드포인트 설정 텍스트.
+/// `args` 가 비면 활성 엔드포인트 설정 + 전체 목록, 있으면 해당 이름 설정.
+fn endpoint_text(cfg: &Config, active_name: &str, args: &str) -> String {
+    let name = args.trim();
+    if !name.is_empty() {
+        return match cfg.endpoints.get(name) {
+            Some(ep) => endpoint_detail_text(name, ep, name == active_name),
+            None => format!(
+                "엔드포인트를 찾을 수 없습니다: {name}\n{}",
+                endpoint_list_text(cfg, active_name)
+            ),
+        };
+    }
+    match cfg.endpoints.get(active_name) {
+        Some(ep) => format!(
+            "{}\n\n{}",
+            endpoint_detail_text(active_name, ep, true),
+            endpoint_list_text(cfg, active_name)
+        ),
+        None => endpoint_list_text(cfg, active_name),
+    }
+}
+
+/// 단일 엔드포인트 설정 상세 텍스트.
+fn endpoint_detail_text(name: &str, ep: &EndpointConfig, active: bool) -> String {
+    let ctx = if ep.context_tokens > 0 {
+        ep.context_tokens.to_string()
+    } else {
+        "자동(프로브)".to_string()
+    };
+    let mut out = format!(
+        "엔드포인트: {name}{}",
+        if active { " (활성)" } else { "" }
+    );
+    out.push_str(&format!("\n  url: {}", ep.url));
+    out.push_str(&format!("\n  model: {}", ep.model));
+    out.push_str(&format!("\n  context_tokens: {ctx}"));
+    out.push_str(&format!("\n  vision: {}", yes_no(ep.vision)));
+    out.push_str(&format!("\n  thinking: {}", yes_no(ep.thinking)));
+    out.push_str(&format!(
+        "\n  reasoning_effort: {}",
+        ep.reasoning_effort.as_deref().unwrap_or("—")
+    ));
+    out.push_str(&format!("\n  max_iterations: {}", ep.max_iterations));
+    out
+}
+
+/// 엔드포인트 목록 텍스트 (활성 표시).
+fn endpoint_list_text(cfg: &Config, active_name: &str) -> String {
+    if cfg.endpoints.is_empty() {
+        return "등록된 엔드포인트가 없습니다.".to_string();
+    }
+    let mut out = String::from("엔드포인트 목록:");
+    for (name, ep) in &cfg.endpoints {
+        let mark = if name == active_name { " (활성)" } else { "" };
+        out.push_str(&format!("\n  {name}{mark} — {} ({})", ep.model, ep.url));
+    }
+    out
+}
+
+/// `/mcp` — MCP 서버 조회 텍스트. `args` 가 비면 목록, 있으면 해당 이름 상세.
+fn mcp_text(cfg: &Config, args: &str) -> String {
+    let name = args.trim();
+    if !name.is_empty() {
+        return match cfg.mcp.get(name) {
+            Some(m) => mcp_detail_text(name, m),
+            None => format!("MCP 서버를 찾을 수 없습니다: {name}\n{}", mcp_list_text(cfg)),
+        };
+    }
+    mcp_list_text(cfg)
+}
+
+/// MCP 서버 목록 텍스트.
+fn mcp_list_text(cfg: &Config) -> String {
+    if cfg.mcp.is_empty() {
+        return "(MCP 서버 없음)".to_string();
+    }
+    let mut out = String::from("MCP 서버:");
+    for (name, m) in &cfg.mcp {
+        out.push_str(&format!(
+            "\n  {name} — {}",
+            m.description.as_deref().unwrap_or("(설명 없음)")
+        ));
+    }
+    out
+}
+
+/// 단일 MCP 서버 설정 상세 텍스트 (env 값은 노출하지 않고 키만 표시).
+fn mcp_detail_text(name: &str, m: &McpConfig) -> String {
+    let mut out = format!("MCP 서버: {name}");
+    if let Some(d) = &m.description {
+        out.push_str(&format!("\n  설명: {d}"));
+    }
+    out.push_str(&format!("\n  command: {}", m.command));
+    if !m.args.is_empty() {
+        out.push_str(&format!("\n  args: {}", m.args.join(" ")));
+    }
+    if !m.env.is_empty() {
+        let keys: Vec<&str> = m.env.keys().map(|k| k.as_str()).collect();
+        out.push_str(&format!("\n  env: {}", keys.join(", ")));
+    }
+    out
+}
+
+/// bool 을 on/off 로 표시한다.
+fn yes_no(v: bool) -> &'static str {
+    if v {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 /// `/session-info` — 현재 세션 정보 텍스트 (id·cwd·모델·컨텍스트 사용량).
 fn session_info_text(session: &session::Session, context_tokens: u64) -> String {
     let est = session.estimate_tokens();
@@ -1663,6 +1824,8 @@ fn print_help() {
     println!("  /resume <id>     — 세션 재개");
     println!("  /model <name> [effort] — 모델 전환 (effort: low|medium|high)");
     println!("  /effort <low|medium|high> — reasoning effort 설정");
+    println!("  /endpoint [name]   — 엔드포인트 설정 조회 (활성·전체·특정 이름)");
+    println!("  /mcp [name]        — MCP 서버 조회 (목록·특정 이름 상세)");
     println!("  /session-info      — 현재 세션 정보 (id·모델·컨텍스트 사용량)");
     println!("  /usage             — 세션 토큰·비용 사용량 표시");
     println!("  /sessions          — 세션 목록 조회");
@@ -1774,5 +1937,53 @@ mod tests {
         assert!(help.contains("/exit"));
         assert!(help.contains("/new"));
         assert!(help.contains("/resume"));
+    }
+
+    /// `/endpoint`·`/mcp` 조회 텍스트가 활성 표시·상세·미존재 안내를 담는다.
+    #[test]
+    fn endpoint_and_mcp_text_lists_and_details() {
+        let mut cfg = crate::config::tests::sample_config();
+        cfg.mcp
+            .get_mut("files")
+            .unwrap()
+            .env
+            .insert("SECRET".to_string(), "topsecret".to_string());
+
+        let list = endpoint_list_text(&cfg, "main");
+        assert!(list.contains("main (활성)"));
+        assert!(list.contains("qwen3.8-27b-q2"));
+
+        let detail = endpoint_text(&cfg, "main", "");
+        assert!(detail.contains("엔드포인트: main (활성)"));
+        assert!(detail.contains("context_tokens: 자동(프로브)"));
+        assert!(detail.contains("vision: on"));
+
+        let missing = endpoint_text(&cfg, "main", "nope");
+        assert!(missing.contains("찾을 수 없습니다: nope"));
+        assert!(missing.contains("엔드포인트 목록:"));
+
+        let mcp = mcp_text(&cfg, "");
+        assert!(mcp.contains("files"));
+        let mcp_detail = mcp_text(&cfg, "files");
+        assert!(mcp_detail.contains("command: npx"));
+        assert!(mcp_detail.contains("파일시스템 접근"));
+        // env 값은 노출하지 않고 키만 보여준다.
+        assert!(mcp_detail.contains("env: SECRET"));
+        assert!(!mcp_detail.contains("topsecret"));
+
+        let mcp_missing = mcp_text(&cfg, "nope");
+        assert!(mcp_missing.contains("찾을 수 없습니다: nope"));
+    }
+
+    /// `/model` 무인자 목록은 현재 모델을 표시한다.
+    #[test]
+    fn available_models_text_marks_current() {
+        let cfg = crate::config::tests::sample_config();
+        let text = available_models_text(&cfg, "qwen3.8-27b-q2");
+        assert!(text.contains("qwen3.8-27b-q2 (현재)"));
+        let text = available_models_text(&cfg, "other");
+        assert!(text.contains("other (현재)"));
+        assert!(text.contains("qwen3.8-27b-q2"));
+        assert!(!text.contains("qwen3.8-27b-q2 (현재)"));
     }
 }

@@ -68,6 +68,22 @@ pub const COMMANDS: &[SlashCommand] = &[
         args_required: true,
     },
     SlashCommand {
+        name: "endpoint",
+        aliases: &["ep"],
+        description: "엔드포인트 설정 조회 (활성·전체·특정 이름)",
+        usage: "/endpoint [name]",
+        takes_args: true,
+        args_required: false,
+    },
+    SlashCommand {
+        name: "mcp",
+        aliases: &[],
+        description: "MCP 서버 조회 (목록·특정 이름 상세)",
+        usage: "/mcp [name]",
+        takes_args: true,
+        args_required: false,
+    },
+    SlashCommand {
         name: "session-info",
         aliases: &["info"],
         description: "현재 세션 정보 표시 (id·모델·컨텍스트 사용량)",
@@ -141,6 +157,35 @@ pub struct Suggestion {
     pub description: &'static str,
 }
 
+/// 인자 자동완성에 쓸 동적 후보 목록 (설정·세션에서 수집).
+///
+/// 슬래시 커맨드는 정적 레지스트리(`COMMANDS`)지만, `/model`·`/endpoint`·`/mcp`
+/// 처럼 인자를 받는 커맨드는 실행 시점의 설정에 따라 후보가 달라진다. 이 구조체가
+/// 그 후보를 담아 `suggest_with` 에 전달된다.
+#[derive(Debug, Clone, Default)]
+pub struct CompletionContext {
+    /// 모델 후보 (`/model`).
+    pub models: Vec<String>,
+    /// 엔드포인트 이름 후보 (`/endpoint`).
+    pub endpoints: Vec<String>,
+    /// MCP 서버 이름 후보 (`/mcp`).
+    pub mcp: Vec<String>,
+}
+
+/// `cmd`(canonical name)에 대한 인자 후보와 설명 라벨을 반환한다.
+/// 인자 자동완성을 지원하지 않는 커맨드면 `None`.
+fn arg_candidates<'a>(
+    cmd: &str,
+    ctx: &'a CompletionContext,
+) -> Option<(&'a [String], &'static str)> {
+    match cmd {
+        "model" => Some((&ctx.models, "모델")),
+        "endpoint" => Some((&ctx.endpoints, "엔드포인트")),
+        "mcp" => Some((&ctx.mcp, "MCP 서버")),
+        _ => None,
+    }
+}
+
 /// `query`(`/` 는 제외된 상태)에 대한 자동완성 제안을 반환한다.
 /// 빈 query 는 전체 목록을 반환한다.
 pub fn suggest(query: &str) -> Vec<Suggestion> {
@@ -168,6 +213,40 @@ pub fn suggest(query: &str) -> Vec<Suggestion> {
                 display: format!("/{c}"),
                 insert: format!("/{c}"),
                 description: cmd.description,
+            });
+        }
+    }
+    out
+}
+
+/// 입력 전체(`/` 포함 가능)에 대한 자동완성 제안.
+///
+/// - 첫 토큰만 입력한 상태(`/model`, `/endpoint`)면 기존 `suggest` 로 커맨드를
+///   제안한다.
+/// - 커맨드 뒤에 공백과 인자를 입력한 상태(`/model qw`, `/mcp git`)면
+///   `ctx` 의 동적 후보로 인자를 제안하고, 선택 시 `insert` 는
+///   `/cmd <후보>` 전체를 되돌려 입력을 교체한다.
+pub fn suggest_with(query: &str, ctx: &CompletionContext) -> Vec<Suggestion> {
+    let body = query.strip_prefix('/').unwrap_or(query);
+    let Some((cmd_raw, rest)) = body.split_once(char::is_whitespace) else {
+        return suggest(body);
+    };
+    let cmd = resolve_alias(cmd_raw);
+    let Some((cands, desc)) = arg_candidates(cmd, ctx) else {
+        // 인자 목록이 없는 커맨드 뒤에서는 드롭다운을 비운다.
+        return Vec::new();
+    };
+    // 인자 첫 토큰만으로 필터링한다 (모델·이름에는 공백이 없다고 가정).
+    let arg = rest.split_whitespace().next().unwrap_or("");
+    let q = arg.to_lowercase();
+    let mut out: Vec<Suggestion> = Vec::new();
+    for c in cands {
+        let lc = c.to_lowercase();
+        if q.is_empty() || lc.starts_with(&q) || lc.contains(&q) {
+            out.push(Suggestion {
+                display: c.clone(),
+                insert: format!("/{cmd} {c}"),
+                description: desc,
             });
         }
     }
@@ -329,6 +408,59 @@ mod tests {
     fn suggests_by_alias() {
         let s = suggest("m");
         assert!(s.iter().any(|x| x.insert == "/m"));
+    }
+
+    #[test]
+    fn registry_has_endpoint_and_mcp() {
+        assert!(suggest("").iter().any(|x| x.insert == "/endpoint"));
+        assert!(suggest("").iter().any(|x| x.insert == "/mcp"));
+        assert_eq!(resolve_alias("ep"), "endpoint");
+        assert!(is_supported("mcp"));
+    }
+
+    #[test]
+    fn suggest_with_completes_model_args() {
+        let ctx = CompletionContext {
+            models: vec!["qwen3-32b".to_string(), "llama3".to_string()],
+            ..Default::default()
+        };
+        // 공백까지 입력하면 전체 모델 후보.
+        let s = suggest_with("/model ", &ctx);
+        assert_eq!(s.len(), 2);
+        assert!(s.iter().any(|x| x.insert == "/model qwen3-32b"));
+        // 접두 필터.
+        let s = suggest_with("/model lla", &ctx);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].insert, "/model llama3");
+        // 커맨드만 입력하면 커맨드 자체를 제안.
+        let s = suggest_with("/model", &ctx);
+        assert!(s.iter().any(|x| x.insert == "/model"));
+    }
+
+    #[test]
+    fn suggest_with_completes_endpoint_and_mcp_args() {
+        let ctx = CompletionContext {
+            endpoints: vec!["main".to_string(), "backup".to_string()],
+            mcp: vec!["files".to_string()],
+            ..Default::default()
+        };
+        let s = suggest_with("/endpoint ", &ctx);
+        assert_eq!(s.len(), 2);
+        assert!(s.iter().any(|x| x.insert == "/endpoint main"));
+        let s = suggest_with("/ep ma", &ctx);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].insert, "/endpoint main");
+        let s = suggest_with("/mcp ", &ctx);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].insert, "/mcp files");
+    }
+
+    #[test]
+    fn suggest_with_no_args_command_returns_empty() {
+        let ctx = CompletionContext::default();
+        // 인자 후보가 없는 커맨드 뒤에서는 제안이 없다.
+        assert!(suggest_with("/help foo", &ctx).is_empty());
+        assert!(suggest_with("/exit ", &ctx).is_empty());
     }
 
     #[test]
