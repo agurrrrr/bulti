@@ -1817,24 +1817,16 @@ fn apply_compact(sess: &mut session::Session, summary: String) {
 }
 
 /// 내부 명령 도움말 출력.
+///
+/// 커맨드 목록은 레지스트리(`crate::slash::COMMANDS`)에서 동적으로 만든다.
+/// 하드코딩하던 시절 `/history`·`/multiline` 이 빠져 목록이 낡는 문제를 막는다.
 fn print_help() {
     println!("내부 명령:");
-    println!("  /exit, /quit, /q  — 대화 종료");
-    println!("  /new             — 새 세션 시작");
-    println!("  /resume <id>     — 세션 재개");
-    println!("  /model <name> [effort] — 모델 전환 (effort: low|medium|high)");
-    println!("  /effort <low|medium|high> — reasoning effort 설정");
-    println!("  /endpoint [name]   — 엔드포인트 설정 조회 (활성·전체·특정 이름)");
-    println!("  /mcp [name]        — MCP 서버 조회 (목록·특정 이름 상세)");
-    println!("  /session-info      — 현재 세션 정보 (id·모델·컨텍스트 사용량)");
-    println!("  /usage             — 세션 토큰·비용 사용량 표시");
-    println!("  /sessions          — 세션 목록 조회");
-    println!("  /compact           — 대화 기록을 요약으로 압축");
-    println!("  /fork              — 현재 세션을 분기 (새 id 로 복제)");
-    println!("  /export [파일경로] — 대화 기록 마크다운으로 내보내기");
-    println!("  /help            — 이 도움말");
-    println!("  Ctrl-D           — 대화 종료 (EOF)");
-    println!("  Ctrl+C           — 중단 후 종료");
+    for c in crate::slash::COMMANDS {
+        println!("  {:<18} — {}", c.usage, c.description);
+    }
+    println!("  {:<18} — {}", "Ctrl-D", "대화 종료 (EOF)");
+    println!("  {:<18} — {}", "Ctrl+C", "중단 후 종료");
 }
 
 /// SIGINT 감시 태스크를 spawn 한다 (run 과 동일).

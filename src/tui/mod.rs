@@ -1345,7 +1345,25 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize, mu
     f.render_widget(p, area);
 }
 
-/// 자동완성 드롭다운 렌더링 — 입력창 위에 최대 6개 항목을 겹쳐 그린다.
+/// 자동완성 드롭다운에 한 번에 보여 줄 최대 항목 수.
+const COMPLETION_MAX_VISIBLE: usize = 6;
+
+/// 선택 인덱스가 항상 창 안에 오도록 보여 줄 항목 범위 `(start, end)` 를
+/// 계산한다. 고정으로 앞쪽 항목만 그리면 뒤에 추가된 커맨드가 선택해도
+/// 보이지 않던 문제를 막는다.
+fn completion_window(total: usize, idx: usize, max_visible: usize) -> (usize, usize) {
+    if total <= max_visible {
+        return (0, total);
+    }
+    let idx = idx.min(total - 1);
+    // 선택이 창 아래 경계를 넘으면 창을 따라 내리고, 끝에서는 마지막
+    // `max_visible` 개가 남도록 고정한다.
+    let start = idx.saturating_sub(max_visible - 1).min(total - max_visible);
+    (start, start + max_visible)
+}
+
+/// 자동완성 드롭다운 렌더링 — 입력창 위에 최대 `COMPLETION_MAX_VISIBLE` 개
+/// 항목을 겹쳐 그린다. 선택 항목이 창 밖으로 나가면 창이 따라 움직인다.
 fn draw_completions(
     f: &mut ratatui::Frame,
     input_area: Rect,
@@ -1355,7 +1373,9 @@ fn draw_completions(
     if completions.is_empty() {
         return;
     }
-    let items = &completions[..completions.len().min(6)];
+    let total = completions.len();
+    let (start, end) = completion_window(total, idx, COMPLETION_MAX_VISIBLE);
+    let items = &completions[start..end];
     let height = items.len() as u16 + 1; // 제목 1줄 + 항목
     let y = input_area.y.saturating_sub(height);
     if y == 0 || y > input_area.y {
@@ -1364,11 +1384,17 @@ fn draw_completions(
     let area = Rect::new(input_area.x, y, input_area.width, height);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![Span::styled(
-        "커맨드 자동완성 (Enter 선택 · Tab/↑↓ 이동 · Esc 취소)",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        format!(
+            "커맨드 자동완성 {}/{} (Enter 선택 · Tab/↑↓ 이동 · Esc 취소)",
+            idx.min(total - 1) + 1,
+            total
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )]));
     for (i, s) in items.iter().enumerate() {
-        let selected = i == idx.min(completions.len() - 1);
+        let selected = start + i == idx.min(total - 1);
         let style = if selected {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
@@ -1742,6 +1768,21 @@ mod tests {
         assert!(active);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].insert, "/model qwen3-32b");
+    }
+
+    /// 창은 선택을 따라 움직여 뒤쪽 항목도 보이게 한다.
+    #[test]
+    fn completion_window_follows_selection() {
+        // 16개, 선택 0: 앞쪽 6개.
+        assert_eq!(completion_window(16, 0, 6), (0, 6));
+        // 선택이 창 아래 경계를 넘으면 창이 따라 내려간다.
+        assert_eq!(completion_window(16, 6, 6), (1, 7));
+        // 마지막 선택: 끝에 붙는다.
+        assert_eq!(completion_window(16, 15, 6), (10, 16));
+        // 전체가 창보다 작으면 전부 표시.
+        assert_eq!(completion_window(3, 2, 6), (0, 3));
+        // 인덱스가 범위를 벗어나도 마지막 창으로 클램프.
+        assert_eq!(completion_window(16, 99, 6), (10, 16));
     }
 
     /// `/` 가 아닌 입력은 드롭다운을 닫는다.
