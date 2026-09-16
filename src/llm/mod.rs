@@ -191,20 +191,40 @@ pub struct ChatOptions {
 /// 최대 툴콜 arguments 누적 길이 (가드).
 const MAX_TOOLCALL_ARGS: usize = 64 * 1024;
 
+/// 스트림 유휴(idle) 타임아웃 기본값.
+///
+/// reqwest 의 `read_timeout` 은 청크를 받을 때마다 리셋되므로 "총 소요 시간"이
+/// 아니라 "마지막 데이터 이후 경과 시간"에 적용된다. 로컬 모델이 긴 응답을
+/// 생성하거나 큰 프롬프트를 prefill 하는 동안에도 스트림이 끊기지 않는다.
+///
+/// 기존에는 요청별 총 타임아웃(120초)을 걸어 두어, 큰 작업에서 120초를 넘겨
+/// 생성 중이던 스트림이 중간에 잘리고 세그먼트가 failed 로 끝났다
+/// (`세그먼트 실패 — 이전 대화 맥락은 유지됩니다`).
+pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// SSE 스트리밍 클라이언트 (DESIGN.md §4.2).
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
-    timeout: Duration,
 }
 
 impl LlmClient {
     /// 새 클라이언트를 만든다.
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            timeout: Duration::from_secs(120),
-        }
+        Self::with_idle_timeout(DEFAULT_STREAM_IDLE_TIMEOUT)
+    }
+
+    /// 유휴 타임아웃을 지정해 클라이언트를 만든다.
+    ///
+    /// 테스트와 느린 로컬 모델 대응을 위해 열어 둔다. 총 타임아웃(`timeout`)은
+    /// 걸지 않는다 — 스트리밍 생성이 길어져도 살아 있게 하려면 유휴 타임아웃만
+    /// 적용해야 한다.
+    pub fn with_idle_timeout(idle: Duration) -> Self {
+        let client = reqwest::Client::builder()
+            .read_timeout(idle)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { client }
     }
 
     /// 스트리밍 채팅 완료를 실행한다.
@@ -222,7 +242,9 @@ impl LlmClient {
             opts.endpoint.url.trim_end_matches('/')
         );
 
-        let mut req = self.client.post(&url).timeout(self.timeout).json(request);
+        // 총 타임아웃은 걸지 않는다. 스트리밍 생성이 길어져도 유휴할 때만
+        // 클라이언트의 read_timeout 이 동작하도록 둔다 (DEFAULT_STREAM_IDLE_TIMEOUT).
+        let mut req = self.client.post(&url).json(request);
         if let Some(key) = &opts.endpoint.api_key {
             req = req.bearer_auth(key);
         }
@@ -730,5 +752,117 @@ mod tests {
             LlmError::Empty => {}
             other => panic!("예상치 못한 오류: {other:?}"),
         }
+    }
+
+    // ── 스트리밍 유휴 타임아웃 (세그먼트 실패 회귀) ──
+
+    /// 원시 TCP 서버로 SSE 를 청크 사이 지연을 두고 흘려보낸다.
+    ///
+    /// 청크 사이 간격(`gap`)은 임의로 조절할 수 있어, "총 소요 시간"이 아니라
+    /// "유휴 시간"이 타임아웃 기준인지 검증할 수 있다.
+    async fn spawn_slow_sse_server(chunks: Vec<String>, gap: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // 요청 헤더까지만 읽고 본문은 무시한다.
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 512];
+            loop {
+                match sock.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let header =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(header.as_bytes()).await;
+            let _ = sock.flush().await;
+            for c in chunks {
+                // 각 청크를 보내기 전에 지연을 둔다 — 첫 청크 지연으로 stall 을
+                // 재현할 수 있고, 중간 지연으로 긴 활성 스트림을 재현할 수 있다.
+                tokio::time::sleep(gap).await;
+                let _ = sock.write_all(c.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+            let _ = sock.write_all(b"data: [DONE]\n\n").await;
+            let _ = sock.flush().await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn sse_content_chunk(text: &str) -> String {
+        format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {"content": text}, "finish_reason": null}]})
+        )
+    }
+
+    fn simple_request() -> ChatRequest {
+        ChatRequest {
+            model: "m".to_string(),
+            messages: vec![],
+            tools: vec![],
+            stream: true,
+            max_tokens: 1024,
+            temperature: None,
+            frequency_penalty: 0.3,
+            presence_penalty: 0.3,
+            reasoning_effort: None,
+        }
+    }
+
+    /// 총 스트리밍 시간이 유휴 타임아웃보다 길어도, 청크가 계속 오면 성공해야 한다.
+    ///
+    /// 기존 총 타임아웃(120초) 방식은 긴 생성 중에도 스트림을 끊어 세그먼트를
+    /// failed 로 만들었다. 이 테스트는 그 회귀를 막는다.
+    #[tokio::test]
+    async fn long_active_stream_survives_idle_timeout() {
+        let chunks: Vec<String> = (0..6).map(|_| sse_content_chunk("가")).collect();
+        // gap 100ms × 6 = 약 600ms (유휴 타임아웃 300ms 보다 김)
+        let url = spawn_slow_sse_server(chunks, Duration::from_millis(100)).await;
+
+        let client = LlmClient::with_idle_timeout(Duration::from_millis(300));
+        let opts = ChatOptions {
+            endpoint: test_endpoint(&url),
+            temperature: None,
+        };
+
+        let resp = client.chat(&opts, &simple_request(), None).await.unwrap();
+        assert_eq!(resp.content.as_deref(), Some("가가가가가가"));
+    }
+
+    /// 청크가 유휴 타임아웃보다 오래 오지 않으면 중단되어야 한다.
+    #[tokio::test]
+    async fn stalled_stream_hits_idle_timeout() {
+        // 서버가 헤더만 보낸 뒤 첫 청크를 유휴 타임아웃(50ms)보다 늦게 보낸다.
+        let url =
+            spawn_slow_sse_server(vec![sse_content_chunk("늦음")], Duration::from_millis(200))
+                .await;
+
+        let client = LlmClient::with_idle_timeout(Duration::from_millis(50));
+        let opts = ChatOptions {
+            endpoint: test_endpoint(&url),
+            temperature: None,
+        };
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.chat(&opts, &simple_request(), None),
+        )
+        .await
+        .expect("테스트가 스스로 타임아웃되면 안 된다")
+        .unwrap_err();
+        assert!(
+            matches!(err, LlmError::Network(_) | LlmError::Sse(_)),
+            "예상치 못한 오류: {err:?}"
+        );
     }
 }

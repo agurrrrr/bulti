@@ -246,6 +246,7 @@ mode = "check"                  # check(알림만) | download(자동 다운로�
 - **finish_reason 처리**: `stop`/`tool_calls`는 정상 흐름. `length` + 내용 비면 "response truncated" incomplete로 종료한다.
 - **usage 수집**: 스트림 마지막 chunk의 `usage`(서버가 주면)를 기록하고, 안 주면 추정치를 기록한다.
 - **오류 매핑**: HTTP 4xx/5xx는 "API error: <status>: <body>"로, 타임아웃·연결 거절은 failed로 분류한다. 재시도는 하지 않는다(shepherd #6944 교훈: 반복 오류에 무재시기가 안전).
+- **타임아웃**: 요청별 총 타임아웃을 걸지 않는다. 스트리밍은 reqwest `read_timeout`(유휴 타임아웃, 기본 300초)만 적용해, 청크가 오는 동안에는 긴 생성도 중단하지 않고 마지막 데이터 이후 300초 동안 데이터가 없을 때만 실패시킨다. 총 타임아웃(기존 120초)은 큰 작업의 긴 생성·prefill 중간에 스트림을 끊어 세그먼트를 `failed`로 만들어 `세그먼트 실패 — 이전 대화 맥락은 유지됩니다`가 나오게 했다.
 
 ### 4.3 에이전트 루프와 완료 판정
 
