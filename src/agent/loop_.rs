@@ -16,9 +16,8 @@ use crate::agent::guards::{
     GuardOutcome,
 };
 use crate::agent::handoff::{
-    build_handoff_prompt, handoff_max_tokens, is_handoff_summary_acceptable,
-    parse_handoff_response, should_attempt_handoff, HandoffDecision, HandoffDepthGuard,
-    HandoffResponse,
+    build_handoff_prompt, is_handoff_summary_acceptable, parse_handoff_response,
+    request_max_tokens, should_attempt_handoff, HandoffDecision, HandoffDepthGuard, HandoffResponse,
 };
 use crate::agent::context::estimate_messages_tokens;
 use crate::config::EndpointConfig;
@@ -190,7 +189,7 @@ pub async fn run_segment(
             messages: messages.clone(),
             tools: tools.clone(),
             stream: true,
-            max_tokens: 4096,
+            max_tokens: request_max_tokens(params.context_tokens),
             temperature: opts.temperature,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -503,7 +502,7 @@ async fn attempt_handoff(
         messages: handoff_msgs,
         tools: vec![],
         stream: true,
-        max_tokens: handoff_max_tokens(context_tokens),
+        max_tokens: request_max_tokens(context_tokens),
         temperature: opts.temperature,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

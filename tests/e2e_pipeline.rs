@@ -220,10 +220,10 @@ fn params(url: &str) -> SegmentParams {
 
 /// 일반 채팅 요청(도구 있음)을 흉내내는 mock.
 ///
-/// 일반 요청은 `tools` 필드가 있고 `max_tokens: 4096` (loop_.rs 기본값).
-/// `up_to_n_times(1)`로 정확히 1회만 매치되게 하여, 여러 4096 요청이
-/// 같은 매처를 재사용하지 않도록 한다. wiremock은 mount된 순서대로
-/// 매치를 시도하므로 mount 순서 = 응답 순서가 보장된다.
+/// 일반 요청은 `tools` 필드가 있고 `max_tokens = context_tokens` (loop_.rs 규칙,
+/// 테스트에서는 context_tokens = 4096). `up_to_n_times(1)`로 정확히 1회만
+/// 매치되게 하여, 여러 요청이 같은 매처를 재사용하지 않도록 한다. wiremock은
+/// mount된 순서대로 매치를 시도하므로 mount 순서 = 응답 순서가 보장된다.
 async fn mount_tool_response(server: &MockServer, chunk: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -239,11 +239,11 @@ async fn mount_tool_response(server: &MockServer, chunk: serde_json::Value) {
         .await;
 }
 
-/// 핸드오프 요청(`tools` 필드 생략, `max_tokens: context/4`)을 흉내내는 mock.
+/// 핸드오프 요청(`tools` 필드 생략, `max_tokens = context_tokens`)을 흉내내는 mock.
 async fn mount_handoff_response(server: &MockServer, chunk: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .and(body_partial_json(json!({"max_tokens": 1024})))
+        .and(body_partial_json(json!({"max_tokens": 4096})))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")

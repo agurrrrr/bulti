@@ -268,9 +268,22 @@ pub fn build_handoff_messages(system_prompt: &str, user_prompt: &str) -> Vec<Mes
     vec![system, user]
 }
 
-/// 핸드오프 요청용 max_tokens (§4.6.1): `context_tokens / 4`.
-pub fn handoff_max_tokens(context_tokens: u64) -> u64 {
-    (context_tokens / 4).max(1)
+/// `context_tokens` 미설정(0)일 때 출력 토큰 상한 폴백.
+pub const DEFAULT_MAX_TOKENS: u64 = 4096;
+
+/// 요청 출력 토큰 상한 (§4.2, §4.6.1): `context_tokens` 와 동일하게 둔다.
+///
+/// 과거 shepherd 규칙은 `context_tokens / 4` 였다(무한 반복 퇴행 시 낭비 상한).
+/// 그러나 thinking 모델이 추론만으로 그 예산을 소진하면 content 없이
+/// `finish_reason=length` 로 끝나 세그먼트가 미완료된다. 그래서 일반 요청과
+/// 핸드오프 요청 모두 컨텍스트 전체를 출력 상한으로 쓴다. `context_tokens` 가
+/// 0(자동 프로브 미설정)이면 서버가 거부하지 않도록 기본값을 쓴다.
+pub fn request_max_tokens(context_tokens: u64) -> u64 {
+    if context_tokens == 0 {
+        DEFAULT_MAX_TOKENS
+    } else {
+        context_tokens
+    }
 }
 
 /// JSON 보고서용 핸드오프 정보 직렬화.
@@ -469,9 +482,11 @@ mod tests {
     // ── 기타 ──
 
     #[test]
-    fn handoff_max_tokens_is_ctx_div_4() {
-        assert_eq!(handoff_max_tokens(4096), 1024);
-        assert_eq!(handoff_max_tokens(1), 1);
+    fn request_max_tokens_equals_context() {
+        assert_eq!(request_max_tokens(4096), 4096);
+        assert_eq!(request_max_tokens(100000), 100000);
+        // context_tokens 미설정(0)이면 기본값 폴백.
+        assert_eq!(request_max_tokens(0), DEFAULT_MAX_TOKENS);
     }
 
     #[test]
@@ -575,7 +590,7 @@ mod tests {
             messages: handoff_messages,
             tools: vec![],
             stream: true,
-            max_tokens: handoff_max_tokens(4096), // 1024
+            max_tokens: request_max_tokens(4096),
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -646,7 +661,7 @@ mod tests {
             messages: handoff_messages,
             tools: vec![],
             stream: true,
-            max_tokens: handoff_max_tokens(4096),
+            max_tokens: request_max_tokens(4096),
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -714,7 +729,7 @@ mod tests {
             messages: handoff_messages,
             tools: vec![],
             stream: true,
-            max_tokens: handoff_max_tokens(4096),
+            max_tokens: request_max_tokens(4096),
             temperature: None,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,

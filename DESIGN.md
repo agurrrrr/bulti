@@ -239,7 +239,7 @@ mode = "check"                  # check(알림만) | download(자동 다운로�
 
 `src/llm/` — OpenAI 호환 `POST /chat/completions` (`stream: true`).
 
-- **요청 조립**: messages, tools(옵트인된 것만), `max_tokens = context_tokens / 4` (shepherd 규칙: ContextTokens/4 — 무한 반복 퇴행 시 낭비 상한), `frequency_penalty = presence_penalty = 0.3` (퇴행 완화), `temperature`는 엔드포인트 설정으로 열어 둔다.
+- **요청 조립**: messages, tools(옵트인된 것만), `max_tokens = context_tokens` (출력 상한을 컨텍스트 길이와 동일하게 둔다. 과거 shepherd 규칙 `ContextTokens/4`는 무한 반복 퇴행 시 낭비를 막는 상한이었으나, thinking 모델이 추론만으로 그 예산을 소진하면 content 없이 `finish_reason=length`로 끝나 세그먼트가 미완료되는 문제가 있어 폐기했다. `context_tokens`가 0이면 4096으로 폴백), `frequency_penalty = presence_penalty = 0.3` (퇴행 완화), `temperature`는 엔드포인트 설정으로 열어 둔다.
 - **SSE 파싱**: `data:` 라인 단위로 JSON delta를 누적한다.
 - **툴콜 누적은 `index` 기반** (shepherd #5814 교훈). 청크로 쪼개 오는 `tool_calls`에서 id·name은 첫 청크에만 오므로, `index`를 키로 arguments 문자열을 이어 붙인다.
 - **reasoning_content**: `delta.reasoning_content`를 별도 버퍼로 누적해 Live 출력(💭)과 히스토리 기록에만 쓰고, 다음 요청의 messages에는 포함하지 않는다(shepherd reasoning_live 패턴).
@@ -329,7 +329,7 @@ handoff_depth ≥ max(12)  ──▶ 런어웨이 가드: 핸드오프 금지 �
 ```
 
 - 새 세그먼트의 프롬프트 = 핸드오프 요약 전문 + `===NEXT_TASK===` 아래의 과제. 후속 세그먼트는 이전 대화를 볼 수 없으므로, 지시문에 "파일 경로·결정사항·주의점을 모두 포함하라"고 명시한다.
-- 핸드오프 요청의 `max_tokens`도 `context_tokens / 4`로 제한한다.
+- 핸드오프 요청의 `max_tokens`도 일반 요청과 동일하게 `context_tokens`로 둔다.
 - depth는 세그먼트마다 +1씩 증가하며 run 시작 시 0이다.
 
 #### 4.6.2 핸드오프 지시문 (9섹션)
