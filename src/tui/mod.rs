@@ -377,9 +377,11 @@ where
 
         terminal.draw(|f| {
             let size = f.area();
-            // 입력창 높이는 입력 줄 수에 따라 늘어난다 (테두리 2줄 포함).
+            // 입력창 높이는 래핑된 화면 행 수에 따라 늘어난다 (테두리 2줄 포함).
+            // '\n' 개수가 아니라 표시 폭 기준 행 수를 써야 긴 한 줄도 잘리지 않는다.
             // 제목 1 + 대화 최소 3 + 상태 1 을 남기고, 너무 커지지 않게 상한을 둔다.
-            let input_rows = input.split('\n').count() as u16;
+            let inner_w = size.width.saturating_sub(2).max(1) as usize;
+            let input_rows = input_visual_rows(&input, inner_w) as u16;
             let max_input_height = size.height.saturating_sub(5).clamp(3, INPUT_MAX_HEIGHT);
             let input_constraint = Constraint::Length((input_rows + 2).clamp(3, max_input_height));
             let chunks = Layout::default()
@@ -743,7 +745,9 @@ where
                     && !modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 if cursor > 0 {
-                    cursor -= 1;
+                    // 바이트가 아니라 문자 경계로 이동한다 (한글 등 멀티바이트
+                    // 문자 중간에 커서가 놓이면 다음 렌더에서 panic 난다).
+                    cursor = prev_boundary(&input, cursor);
                 } else {
                     // 입력 경계에서 ← 는 대화 스크롤 (기존 동작 유지).
                     offset_from_bottom = offset_from_bottom.saturating_add(1);
@@ -754,7 +758,8 @@ where
                     && !modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 if cursor < input.len() {
-                    cursor += 1;
+                    // 문자 경계 단위로 이동한다 (바이트 단위는 멀티바이트를 깬다).
+                    cursor = next_boundary(&input, cursor);
                 } else {
                     offset_from_bottom = offset_from_bottom.saturating_sub(1);
                 }
@@ -838,9 +843,6 @@ fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
-/// 입력창 커서(단일 라인 편집) 헬퍼. `cursor` 는 문자 인덱스 기준이며
-/// 표시 폭(ASCII 1 / 그 외 2)으로 계산한 열(column)을 반환한다.
-
 /// 입력 문자열을 교체하고 커서를 끝으로 옮긴다 (히스토리·자동완성 선택 시).
 fn set_input(input: &mut String, cursor: &mut usize, text: String) {
     *input = text;
@@ -856,8 +858,10 @@ fn split_cursor(s: &str, idx: usize) -> (String, String, String) {
         return (before.to_string(), String::new(), String::new());
     }
     // rest 의 첫 문자 끝(바이트) 찾기 — UTF-8 lead byte 기준.
+    // `1..b.len()` (끝 배타) 이어야 한다: 마지막 문자는 다음 바이트가 없으므로
+    // 범위에 b.len() 을 넣으면 `b[b.len()]` 로 panic 한다.
     let b = rest.as_bytes();
-    let end = (1..=b.len())
+    let end = (1..b.len())
         .find(|&i| b[i] < 0b1000_0000 || b[i] >= 0b1100_0000)
         .unwrap_or(b.len());
     let (cur, after) = rest.split_at(end);
@@ -871,16 +875,35 @@ fn insert_char(input: &mut String, cursor: &mut usize, c: char) {
     *cursor = pos + c.len_utf8();
 }
 
+/// `i` 바로 앞쪽의 문자 경계(직전 문자 시작 바이트)를 반환한다.
+/// 좌측 화살표·Backspace 처럼 커서를 한 문자 뒤로 옮길 때 쓴다.
+fn prev_boundary(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    if i == 0 {
+        return 0;
+    }
+    (0..i).rev().find(|&j| s.is_char_boundary(j)).unwrap_or(0)
+}
+
+/// `i` 위치 문자의 끝(다음 문자 경계 바이트)을 반환한다.
+/// 우측 화살표·Delete 처럼 커서를 한 문자 앞으로 옮길 때 쓴다.
+fn next_boundary(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    if i >= s.len() {
+        return s.len();
+    }
+    (i + 1..=s.len())
+        .find(|&j| s.is_char_boundary(j))
+        .unwrap_or(s.len())
+}
+
 /// 커서 앞 문자를 지운다.
 fn delete_back(input: &mut String, cursor: &mut usize) {
     if *cursor == 0 {
         return;
     }
     // 커서에 붙은 앞쪽 문자(바이트)의 시작 찾기.
-    let start = (0..*cursor)
-        .rev()
-        .find(|&i| input.is_char_boundary(i))
-        .unwrap_or(0);
+    let start = prev_boundary(input, *cursor);
     input.replace_range(start..*cursor, "");
     *cursor = start;
 }
@@ -891,9 +914,7 @@ fn delete_fwd(input: &mut String, cursor: &mut usize) {
         return;
     }
     // 커서에 붙은 뒤쪽 문자(바이트)의 끝 찾기.
-    let end = (*cursor..=input.len())
-        .find(|&i| input.is_char_boundary(i) && i > *cursor)
-        .unwrap_or(input.len());
+    let end = next_boundary(input, *cursor);
     input.replace_range(*cursor..end, "");
 }
 
@@ -1024,22 +1045,25 @@ fn wrap_spans<'a>(spans: &[Span<'a>], width: usize) -> Vec<Vec<Span<'a>>> {
     let mut cur: Vec<Span<'a>> = Vec::new();
     let mut w = 0usize;
     for span in spans {
-        let mut rest: &str = span.content.as_ref();
-        let mut s = String::new();
-        while !rest.is_empty() {
-            let ch = rest.chars().next().unwrap();
+        // 아직 `cur` 로 옮기지 않은 같은 스타일 문자를 모아 둔다.
+        let mut pending = String::new();
+        for ch in span.content.chars() {
             let cw = if ch.is_ascii() { 1 } else { 2 };
-            if w + cw > width && !cur.is_empty() {
+            // 현재 행에 내용이 있는데(w > 0) 이 문자를 넣으면 넘치면 줄을 바꾼다.
+            // `w > 0` 이어야 한다: 넓은 문자는 `w + cw` 가 폭을 건너뛰므로
+            // "비어 있는 행"을 넘침으로 오판하면 안 된다.
+            if w + cw > width && w > 0 {
+                if !pending.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut pending), span.style));
+                }
                 out.push(std::mem::take(&mut cur));
                 w = 0;
             }
-            s.push(ch);
+            pending.push(ch);
             w += cw;
-            rest = &rest[ch.len_utf8()..];
-            if rest.is_empty() || w >= width {
-                cur.push(Span::styled(s.clone(), span.style));
-                s.clear();
-            }
+        }
+        if !pending.is_empty() {
+            cur.push(Span::styled(pending, span.style));
         }
     }
     if !cur.is_empty() || out.is_empty() {
@@ -1364,81 +1388,125 @@ fn push_tool_event(lines: &mut Vec<ChatLine>, ev: crate::llm::ToolEvent) {
 }
 
 /// 입력창 렌더링. `cursor` 는 바이트 인덱스이며, 그 위치를 블록 셀로 칠해
-/// 커서를 표시한다 (줄 끝·빈 입력이어도 보이도록 공백 셀을 그린다). 추가로
-/// 래핑이 없는 경우 실제 터미널 커서도 그 자리에 배치해 포커스를 보여 준다.
-/// 입력에 줄바꿈이 있으면 여러 줄로 렌더하고, 커서가 속한 줄이 보이도록
-/// 세로 스크롤한다.
+/// 커서를 표시한다 (줄 끝·빈 입력이어도 보이도록 공백 셀을 그린다). 입력이
+/// 폭을 넘으면 자동으로 줄바꿈하고, 커서가 속한 **화면 행**이 보이도록 세로
+/// 스크롤한다. 래핑이 일어나도 커서 좌표를 정확히 계산하므로 실제 터미널
+/// 커서도 항상 제자리에 배치한다.
 fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str, cursor: usize) {
     let title = crate::i18n::tr(
         "Input (Enter send · Shift+Enter newline · ↑↓ history · Tab complete · Ctrl+T thinking · Ctrl+Q quit)",
     );
-    // 커서 표시: [cursor 앞][커서 셀(블록)][cursor 뒤]. 커서가 줄 끝이거나
-    // 입력이 비어 있으면 문자 스팬이 비어 보이지 않으므로 공백 셀을 그린다.
+    let inner_w = area.width.saturating_sub(2).max(1) as usize;
+    // 커서 표시: [커서 앞][커서 셀(블록)][커서 뒤]. 커서가 줄 끝이거나 입력이
+    // 비어 있으면 문자 스팬이 비어 보이지 않으므로 공백 셀을 그린다.
     let cursor_style = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let cc = cursor.min(input.len());
-    let mut off = 0usize;
-    let lines: Vec<Line> = input
-        .split('\n')
-        .map(|l| {
-            let lstart = off;
-            let lend = off + l.len();
-            off += l.len() + 1; // '\n' 바이트 포함
-            if cc >= lstart && cc <= lend {
-                let (before, cur, after) = split_cursor(l, cc - lstart);
-                let cur = if cur.is_empty() { " ".to_string() } else { cur };
-                Line::from(vec![
-                    Span::raw(before),
-                    Span::styled(cur, cursor_style),
-                    Span::raw(after),
-                ])
-            } else {
-                Line::from(Span::raw(l))
-            }
-        })
-        .collect();
-    // 커서가 속한 줄이 스크롤 창 안에 들어오도록 오프셋을 계산한다.
-    let cursor_line = input[..cc].matches('\n').count();
+    let (rows, cursor_row, cursor_col) = wrap_input(input, cursor, inner_w, cursor_style);
+    // 커서가 속한 화면 행이 스크롤 창 안에 들어오도록 오프셋을 계산한다.
     let inner_h = area.height.saturating_sub(2) as usize;
     let scroll = if inner_h == 0 {
         0
     } else {
-        cursor_line.saturating_sub(inner_h - 1)
+        cursor_row.saturating_sub(inner_h - 1)
     };
-    let p = Paragraph::new(lines)
+    let p = Paragraph::new(rows)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     f.render_widget(p, area);
 
     // 실제 터미널 커서를 입력 위치로 옮겨 깜빡이는 커서로 포커스를 보여 준다.
-    // word wrap 이 일어나면 화면 좌표가 어긋나므로, 어떤 논리 줄도 폭을
-    // 넘지 않을 때만 배치한다 (넘치면 블록 셀 커서가 대신 표시된다).
-    let inner_w = area.width.saturating_sub(2) as usize;
+    // `cursor_row`/`cursor_col` 이 이미 래핑을 반영하므로 래핑 여부와 무관하다.
     if inner_h > 0 {
-        if let Some((col, line)) = input_cursor_pos(input, cc, inner_w) {
-            let x = area.x + 1 + col as u16;
-            let y = area.y + 1 + (line - scroll) as u16;
-            if x < area.x + area.width - 1 && y < area.y + area.height - 1 {
-                f.set_cursor_position((x, y));
-            }
+        let x = area.x + 1 + cursor_col as u16;
+        let y = area.y + 1 + (cursor_row - scroll) as u16;
+        if x < area.x + area.width - 1 && y < area.y + area.height - 1 {
+            f.set_cursor_position((x, y));
         }
     }
 }
 
-/// 입력 커서의 `(표시 열, 논리 줄)` 을 계산한다. 모든 논리 줄이 폭 `inner_w`
-/// 안에 들어가 래핑이 없을 때만 `Some` 을 반환한다. 래핑이 일어나면 화면
-/// 좌표를 단순 계산으로 알 수 없어 `None` (블록 셀 커서로 대체).
-fn input_cursor_pos(input: &str, cursor: usize, inner_w: usize) -> Option<(usize, usize)> {
-    if inner_w == 0 || input.split('\n').any(|l| text_width(l) > inner_w) {
-        return None;
-    }
+/// 입력을 표시 폭 `inner_w` 에 맞춰 래핑한 화면 행 목록과 커서의
+/// `(행, 열)` 을 반환한다. 커서 셀은 `cursor_style` 로 칠하며, 그 스타일을
+/// 가진 스팬을 찾아 래핑 후 위치를 역산한다 (스타일이 유일하므로 안전하다).
+fn wrap_input(
+    input: &str,
+    cursor: usize,
+    inner_w: usize,
+    cursor_style: Style,
+) -> (Vec<Line<'static>>, usize, usize) {
     let cc = cursor.min(input.len());
-    let line = input[..cc].matches('\n').count();
-    let line_start = input[..cc].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    Some((text_width(&input[line_start..cc]), line))
+    // 어떤 경로로든 커서가 문자 중간 바이트에 놓여도 렌더가 panic 하지 않도록
+    // 마지막 방어선으로 앞쪽 문자 경계에 맞춘다.
+    let cc = if input.is_char_boundary(cc) {
+        cc
+    } else {
+        prev_boundary(input, cc)
+    };
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    let mut found = false;
+    let mut off = 0usize;
+    for l in input.split('\n') {
+        let lstart = off;
+        let lend = off + l.len();
+        off += l.len() + 1; // '\n' 바이트 포함
+        let spans: Vec<Span<'static>> = if !found && cc >= lstart && cc <= lend {
+            let (before, cur, after) = split_cursor(l, cc - lstart);
+            let cur = if cur.is_empty() { " ".to_string() } else { cur };
+            vec![
+                Span::raw(before),
+                Span::styled(cur, cursor_style),
+                Span::raw(after),
+            ]
+        } else {
+            vec![Span::raw(l.to_string())]
+        };
+        for wrapped in wrap_spans(&spans, inner_w) {
+            if !found {
+                if let Some(ci) = wrapped.iter().position(|s| s.style == cursor_style) {
+                    found = true;
+                    cursor_row = rows.len();
+                    cursor_col = wrapped[..ci]
+                        .iter()
+                        .map(|s| text_width(s.content.as_ref()))
+                        .sum();
+                }
+            }
+            rows.push(Line::from(wrapped));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::from(""));
+    }
+    (rows, cursor_row, cursor_col)
+}
+
+/// 한 논리 줄을 폭 `width` 로 래핑했을 때의 화면 행 수 (최소 1).
+/// `wrap_spans` 와 같은 greedy 규칙(현재 행이 비어 있으면 넘쳐도 한 행에 둔다).
+fn wrapped_rows(s: &str, width: usize) -> usize {
+    if width == 0 || s.is_empty() {
+        return 1;
+    }
+    let mut rows = 1usize;
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = if ch.is_ascii() { 1 } else { 2 };
+        if w + cw > width && w > 0 {
+            rows += 1;
+            w = 0;
+        }
+        w += cw;
+    }
+    rows
+}
+
+/// 입력 전체가 차지하는 화면 행 수 (입력창 높이 계산용). `wrap_input` 의
+/// 래핑과 동일한 규칙을 쓴다.
+fn input_visual_rows(input: &str, width: usize) -> usize {
+    input.split('\n').map(|l| wrapped_rows(l, width)).sum()
 }
 
 /// 자동완성 드롭다운에 한 번에 보여 줄 항목 수.
@@ -1847,29 +1915,85 @@ mod tests {
         assert_eq!((s.as_str(), c), ("", 0));
     }
 
-    /// input_cursor_pos: 빈 입력·줄 끝·여러 줄·한글의 (표시 열, 논리 줄).
+    /// wrap_input: 빈 입력·줄 끝·여러 줄·한글의 커서 `(화면 행, 표시 열)`.
     #[test]
-    fn input_cursor_pos_various() {
-        // 빈 입력은 첫 줄 첫 열.
-        assert_eq!(input_cursor_pos("", 0, 80), Some((0, 0)));
+    fn wrap_input_cursor_position() {
+        let style = Style::default().bg(Color::Cyan);
+        let pos = |input: &str, cursor: usize, w: usize| {
+            let (_, row, col) = wrap_input(input, cursor, w, style);
+            (row, col)
+        };
+        // 빈 입력은 첫 행 첫 열.
+        assert_eq!(pos("", 0, 80), (0, 0));
         // 한 줄 끝/중간.
-        assert_eq!(input_cursor_pos("hello", 5, 80), Some((5, 0)));
-        assert_eq!(input_cursor_pos("hello", 2, 80), Some((2, 0)));
+        assert_eq!(pos("hello", 5, 80), (0, 5));
+        assert_eq!(pos("hello", 2, 80), (0, 2));
         // 둘째 줄 시작/끝 (바이트 인덱스: "ab\ncd" 에서 'c'=3, 끝=5).
-        assert_eq!(input_cursor_pos("ab\ncd", 3, 80), Some((0, 1)));
-        assert_eq!(input_cursor_pos("ab\ncd", 5, 80), Some((2, 1)));
+        assert_eq!(pos("ab\ncd", 3, 80), (1, 0));
+        assert_eq!(pos("ab\ncd", 5, 80), (1, 2));
         // 한글은 표시 폭 2 기준.
-        assert_eq!(input_cursor_pos("한글", 3, 80), Some((2, 0)));
+        assert_eq!(pos("한글", 3, 80), (0, 2));
     }
 
-    /// input_cursor_pos: 폭을 넘는 줄(래핑)이거나 폭이 0 이면 None.
+    /// wrap_input: 폭을 넘는 줄은 래핑되고 커서 행도 화면 행 기준으로 계산된다.
     #[test]
-    fn input_cursor_pos_none_when_wrapped() {
-        assert_eq!(input_cursor_pos("hello", 5, 0), None);
-        // 정확히 폭에 맞으면 래핑 아님.
-        assert_eq!(input_cursor_pos("hello", 5, 5), Some((5, 0)));
-        // 한 줄이라도 넘치면 좌표를 알 수 없어 None.
-        assert_eq!(input_cursor_pos("hello world", 5, 5), None);
+    fn wrap_input_cursor_wraps() {
+        let style = Style::default().bg(Color::Cyan);
+        // "hello world" 폭 5: "hello" / " worl" / "d". 커서가 "hello" 끝(5)이면
+        // 커서 셀이 다음 행 첫 열로 넘어간다.
+        let (_, row, col) = wrap_input("hello world", 5, 5, style);
+        assert_eq!((row, col), (1, 0));
+        // 한글 폭 3: "한" / "글 " — 커서는 둘째 행 글자 뒤.
+        let (_, row, col) = wrap_input("한글", 6, 3, style);
+        assert_eq!((row, col), (1, 2));
+    }
+
+    /// wrapped_rows / input_visual_rows: 래핑 후 화면 행 수.
+    #[test]
+    fn wrapped_row_counts() {
+        assert_eq!(wrapped_rows("", 5), 1);
+        assert_eq!(wrapped_rows("hello", 5), 1);
+        assert_eq!(wrapped_rows("hello world", 5), 3);
+        assert_eq!(wrapped_rows("한글", 3), 2);
+        // 논리 줄이 2개면 각 줄의 행 수를 더한다.
+        assert_eq!(input_visual_rows("ab\ncd", 80), 2);
+        assert_eq!(input_visual_rows("hello world", 5), 3);
+    }
+
+    /// prev_boundary/next_boundary: 멀티바이트 문자를 한 문자 단위로 넘는다.
+    #[test]
+    fn char_boundary_moves() {
+        assert_eq!(prev_boundary("abc", 2), 1);
+        assert_eq!(prev_boundary("한글", 6), 3);
+        assert_eq!(prev_boundary("한글", 3), 0);
+        assert_eq!(prev_boundary("abc", 0), 0);
+        assert_eq!(next_boundary("abc", 0), 1);
+        assert_eq!(next_boundary("한글", 0), 3);
+        assert_eq!(next_boundary("한글", 3), 6);
+        assert_eq!(next_boundary("abc", 3), 3);
+        // 좌/우 이동을 반복해도 항상 문자 경계에 머문다 (크래시 회귀 방지).
+        let s = "a한b";
+        let mut c = s.len();
+        for _ in 0..3 {
+            c = prev_boundary(s, c);
+            assert!(s.is_char_boundary(c));
+        }
+        assert_eq!(c, 0);
+        for _ in 0..3 {
+            c = next_boundary(s, c);
+            assert!(s.is_char_boundary(c));
+        }
+        assert_eq!(c, s.len());
+    }
+
+    /// wrap_input: 커서가 문자 중간 바이트여도 panic 하지 않고 앞 경계로 스냅한다.
+    /// (좌/우 이동이 바이트 단위이던 시절 실제로 렌더에서 panic 났다.)
+    #[test]
+    fn wrap_input_snaps_non_boundary_cursor() {
+        let style = Style::default().bg(Color::Cyan);
+        // "한글" 5바이트는 둘째 글자 중간 → 3(둘째 글자 시작)으로 스냅.
+        let (_, row, col) = wrap_input("한글", 5, 80, style);
+        assert_eq!((row, col), (0, 2));
     }
 
     /// TTY 가 아니면 run_tui 는 None 을 반환한다 (스트림 텍스트 폴백).
