@@ -1,9 +1,10 @@
 # 불티 (Bulti) — 설계 문서
 
-- 문서 버전: v2 · 작성일: 2026-09-02 (개편: 대화형 인터페이스 `bulti chat` + 단발 `bulti run` 두 진입점 도입)
-- 대상 릴리즈: v0.2
+- 문서 버전: v2.1 · 작성일: 2026-09-02 · 최종 현행화: 2026-09-18 (파일 구조·기술 스택·관련 문서 갱신)
+- 대상 릴리즈: v0.2.0 (구현 완료)
 - shepherd 프로젝트: `bulti` (담당 양: 양52)
 - 참고 자료: shepherd 위키 `embedded-provider`, `embedded-context-management`, `embedded-handoff-structured-summary`, 실측 llama.cpp `/v1/models` 응답
+- 관련 문서: [`README.md`](README.md) (영문), [`README_KO.md`](README_KO.md) (한국어), [`LICENSE`](LICENSE) (MIT)
 
 ---
 
@@ -107,46 +108,59 @@
 ```
 bulti/
 ├── Cargo.toml
-├── src/
-│   ├── main.rs            # 진입점, clap 파싱, exit code 매핑
-│   ├── cli/               # 서브커맨드 구현 (chat, run, endpoint, history, skill, mcp, prompt, config, update, version)
-│   ├── config.rs          # ~/.bulti/config.tomt 로드·저장 (serde + toml)
-│   ├── endpoint/          # 엔드포인트 등록·프로브·컨텍스트 길이 확정
-│   ├── llm/               # OpenAI 호환 클라이언트 (SSE 스트리밍, 툴콜 누적)
-│   ├── agent/
-│   │   ├── mod.rs         # run·session 오케스트레이션, 체인·세그먼트 관리
-│   │   ├── loop.rs        # 세그먼트 루프, 완료 판정
-│   │   ├── session.rs     # 대화형 프롬프트 루프, 턴·세션 관리 (§4.13)
-│   │   ├── context.rs     # 토큰 추정, 트리밍, 툴 결과 절단
-│   │   ├── handoff.rs     # 핸드오프 지시문·파서·품질 게이트
-│   │   └── guards.rs      # 퇴행·거짓 완료·stuck 가드
-│   ├── tools/             # 네이티브 툴 + ToolRegistry (정의·실행 통합)
-│   ├── history/           # rusqlite 저장·조회
-│   ├── skills/            # 레이지 스킬 발견·로딩
-│   ├── mcp/               # 레이지 MCP 클라이언트 (rmcp)
-│   ├── prompt/            # 시스템 프롬프트 계층 조립
-│   ├── tui/               # 대화형 TUI 렌더링 (§4.13) — ratatui
-│   └── update/            # GitHub 릴리즈 확인·자가 교체
-├── tests/                 # 통합 테스트 (wiremock SSE 흉내, e2e 스크립트)
-└── .github/workflows/     # CI (fmt, clippy -D warnings, test)
+├── DESIGN.md              # 이 문서
+├── README.md / README_KO.md
+├── LICENSE                # MIT
+├── rustfmt.toml
+├── examples/              # 오케스트레이션 예제 (셸 파이프라인·CI 잡·서브프로세스)
+├── tests/                 # 통합 테스트 (wiremock SSE 흉내, e2e 파이프라인)
+├── .github/workflows/     # CI (fmt, clippy -D warnings, test, release build)
+└── src/
+    ├── main.rs            # 진입점, clap 파싱, exit code 매핑
+    ├── lib.rs             # 라이브러리 크레이트 루트
+    ├── cli/               # 서브커맨드 (chat, run, session, endpoint, history, skill, mcp, prompt, config, update, version)
+    ├── config.rs          # ~/.bulti/config.toml 로드·저장 (serde + toml)
+    ├── endpoint/          # 엔드포인트 등록·프로브·컨텍스트 길이 확정 (probe.rs)
+    ├── llm/               # OpenAI 호환 클라이언트 (SSE 스트리밍, 툴콜 누적)
+    ├── agent/
+    │   ├── mod.rs         # run·session 오케스트레이션, 체인·세그먼트 관리
+    │   ├── loop_.rs       # 세그먼트 루프, 완료 판정 (예약어 회피로 밑줄)
+    │   ├── context.rs     # 토큰 추정, 트리밍, 툴 결과 절단
+    │   ├── handoff.rs     # 핸드오프 지시문·파서·품질 게이트
+    │   └── guards.rs      # 퇴행·거짓 완료·stuck 가드
+    ├── tools/             # 네이티브 툴 + ToolRegistry (정의·실행 통합)
+    ├── session/           # 대화형 세션 저장·로드·삭제 (§4.13)
+    ├── history/           # rusqlite 저장·조회
+    ├── skills/            # 레이지 스킬 발견·로딩 (bundled/ 예제 포함)
+    ├── mcp/               # 레이지 MCP 클라이언트 (rmcp)
+    ├── prompt/            # 시스템 프롬프트 계층 조립 (base.md)
+    ├── slash/             # 슬래시 커맨드 레지스트리·자동완성 (§4.13)
+    ├── completion/        # 프롬프트 히스토리 자동완성 소스
+    ├── render/            # Markdown → ANSI/TUI 렌더링
+    ├── i18n/              # en/ko/ja 카탈로그·언어 상태
+    ├── tui/               # 대화형 TUI 렌더링 (§4.13) — ratatui
+    └── update/            # GitHub 릴리즈 확인·자가 교체 (self_replace.rs)
 ```
 
 ### 2.4 기술 스택
 
 | 용도 | 크레이트 | 비고 |
 |---|---|---|
-| 비동기 런타임 | `tokio` (rt-multi-thread, macros, process, fs, io-util) | bash 실행, SSE 스트리밍 |
-| HTTP | `reqwest` 0.12 (rustls-tls, stream) | 시스템 OpenSSL 의존 제거 |
-| SSE 파싱 | `eventsource-stream` | `reqwest::bytes_stream`과 조합 |
+| 비동기 런타임 | `tokio` (rt-multi-thread, macros, process, fs, io-util, signal) | bash 실행, SSE 스트리밍 |
+| HTTP | `reqwest` 0.12 (rustls-tls, stream, json, blocking) | 시스템 OpenSSL 의존 제거 |
+| SSE 파싱 | `eventsource-stream`, `futures-util`, `tokio-stream` | `reqwest::bytes_stream`과 조합 |
 | 직렬화 | `serde`, `serde_json`, `toml` | |
 | CLI | `clap` v4 derive | |
 | 히스토리 DB | `rusqlite` (bundled) | 조회 쿼리가 필요하므로 JSONL이 아니라 SQLite |
 | 경로 | `dirs` | `~/.bulti` 해석 |
-| 탐색 | `walkdir`, `globset`, `regex` | glob/grep 도구 자체 구현 (ripgrep 의존 없음) |
+| 탐색 | `walkdir`, `glob`, `regex` | glob/grep 도구 자체 구현 (ripgrep 의존 없음) |
 | MCP | `rmcp` (공식 Rust SDK) | stdio transport |
 | TUI | `ratatui`, `crossterm` | 대화형 채팅 UI (§4.13) |
-| 자가 교체 | `self-replace` | 실행 중 바이너리 rename 교체 |
-| 기타 | `semver`, `sha2`, `uuid`, `thiserror`, `anyhow`, `tracing` + `tracing-subscriber` | |
+| 이미지 | `base64` | 비전 엔드포인트의 read_file 이미지 인코딩 |
+| 자가 교체 | (내장 구현 `src/update/self_replace.rs`) | 외부 `self-replace` 크레이트를 쓰지 않고 직접 구현 |
+| 업데이트 | `semver`, `sha2`, `tar`, `flate2`, `tempfile` | 릴리즈 비교·체크섬·해제 |
+| 기타 | `thiserror`, `anyhow`, `tracing` + `tracing-subscriber` | 체인 UUID는 `make_uuid` 자체 구현(외부 `uuid` 의존 없음) |
+| 테스트(dev) | `wiremock` | SSE 엔드포인트 흉내 |
 
 - Edition 2024, 최신 안정 러스트툴체인. `rustfmt.toml`과 `#![deny(clippy::all)]` 기본 적용.
 - 모든 사용자 출력은 stderr 또는 stdout으로 명확히 분리한다 (§4.12).
@@ -179,6 +193,7 @@ bulti/
 ```toml
 version = 1
 active_endpoint = "main"
+language = "en"                 # en | ko | ja (기본 영어)
 
 [endpoints.main]
 url = "http://127.0.0.1:8084/v1"
@@ -188,6 +203,9 @@ context_tokens = 0              # 0이면 자동 프로브 (§4.1.2)
 vision = true                   # 비전 가능 모델 토글 (shepherd 교훈: 명시 켜기)
 thinking = true                 # reasoning_content 표시·기록 여부
 max_iterations = 200            # 세그먼트당 도구 호출 턴 상한
+# reasoning_effort = "medium"   # low | medium | high
+# input_price_per_mtok = 0.0    # 1M 토큰당 input 가격 (USD), 선택적 비용 표시
+# output_price_per_mtok = 0.0   # 1M 토큰당 output 가격 (USD)
 
 [mcp.files]
 command = "npx"

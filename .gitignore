@@ -6,3 +6,9 @@
 /mock_out.txt
 /src/new.rs
 .tmp_repro/
+# 릴리즈 빌드 산출물 (프로젝트 루트에 두는 정적 바이너리와 체크섬)
+/bulti
+/bulti-*
+# 릴리즈/테스트가 남기는 로그·보고서
+/bulti-report.json
+/bulti-progress.log
