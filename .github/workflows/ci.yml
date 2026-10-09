@@ -9,8 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 품질 검증은 한 번만 돌린다. 같은 검사를 4개 플랫폼에서 반복할 필요가 없다.
   ci:
-    name: fmt · clippy · test · build
+    name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,24 +30,75 @@ jobs:
       - name: test
         run: cargo test
 
-      - name: build release
-        run: cargo build --release --locked
+  # 실행 파일은 4개 플랫폼 각각 만든다. 각 타깃은 해당 아키텍처의 네이티브 러너에서
+  # 빌드한다(rusqlite bundled, rustls/ring 은 크로스컴파일이 어렵다). 러너·musl 설정은
+  # release.yml 과 동일하다. 이름 접미는 update 모듈의 triple 규칙 {arch}-{os}-{env} 를 쓴다.
+  binaries:
+    name: binary (${{ matrix.label }})
+    needs: ci
+    # pull_request 에서는 실행 파일을 받지 않는다. 아티팩트는 main push 에서만 남긴다.
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64-linux-gnu
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            musl: false
+          - label: x86_64-linux-musl
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            musl: true
+          - label: aarch64-linux-gnu
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            musl: false
+          - label: aarch64-linux-musl
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            musl: true
+    steps:
+      - uses: actions/checkout@v4
 
-      # push 빌드의 산출물을 아티팩트로 남긴다. 이 단계가 없으면 실행 파일은 러너와 함께 사라진다.
-      # 이름 접미는 release.yml(태그 릴리즈)과 같은 규칙을 쓴다: bulti-{arch}-{os}-{env}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl 타깃은 musl-gcc 가 필요하다. 러너가 이미 같은 아키텍처이므로 네이티브 컴파일이다.
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # 압축하지 않은 단일 실행 파일과 sha256 를 올린다. Actions 에서 내려받아 바로 실행할 수 있다.
+      # update 모듈이 요구하는 .tar.gz 규칙은 태그 릴리즈(release.yml)에만 필요하다.
       - name: Stage binary
         run: |
           mkdir -p dist
-          cp target/release/bulti dist/bulti-x86_64-linux-gnu
-          (cd dist && sha256sum bulti-x86_64-linux-gnu > bulti-x86_64-linux-gnu.sha256)
+          cp target/${{ matrix.target }}/release/bulti dist/bulti-${{ matrix.label }}
+          (cd dist && sha256sum bulti-${{ matrix.label }} > bulti-${{ matrix.label }}.sha256)
           ls -l dist && cat dist/*.sha256
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bulti-x86_64-linux-gnu
+          name: bulti-${{ matrix.label }}
           path: |
-            dist/bulti-x86_64-linux-gnu
-            dist/bulti-x86_64-linux-gnu.sha256
+            dist/bulti-${{ matrix.label }}
+            dist/bulti-${{ matrix.label }}.sha256
           if-no-files-found: error
           retention-days: 30
