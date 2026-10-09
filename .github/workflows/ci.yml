@@ -10,7 +10,7 @@ env:
 
 jobs:
   ci:
-    name: fmt · clippy · test
+    name: fmt · clippy · test · build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,4 +30,23 @@ jobs:
         run: cargo test
 
       - name: build release
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      # push 빌드의 산출물을 아티팩트로 남긴다. 이 단계가 없으면 실행 파일은 러너와 함께 사라진다.
+      # 이름 접미는 release.yml(태그 릴리즈)과 같은 규칙을 쓴다: bulti-{arch}-{os}-{env}
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/release/bulti dist/bulti-x86_64-linux-gnu
+          (cd dist && sha256sum bulti-x86_64-linux-gnu > bulti-x86_64-linux-gnu.sha256)
+          ls -l dist && cat dist/*.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bulti-x86_64-linux-gnu
+          path: |
+            dist/bulti-x86_64-linux-gnu
+            dist/bulti-x86_64-linux-gnu.sha256
+          if-no-files-found: error
+          retention-days: 30
