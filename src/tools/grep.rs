@@ -44,8 +44,7 @@ pub fn register(reg: &ToolRegistry) {
             let glob_filter = str_arg(&args, "glob");
             let path_arg = str_arg(&args, "path");
 
-            let re = Regex::new(&pattern)
-                .map_err(|e| format!("grep: 정규식 파싱 실패: {e}"))?;
+            let re = Regex::new(&pattern).map_err(|e| format!("grep: 정규식 파싱 실패: {e}"))?;
 
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             let start = match &path_arg {
@@ -59,12 +58,10 @@ pub fn register(reg: &ToolRegistry) {
             // 자체 구현(walkdir+regex). .git 등 숨김 디렉터리 제외.
             let mut results: Vec<String> = Vec::new();
 
-            let walker = WalkDir::new(&start)
-                .into_iter()
-                .filter_entry(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    !(name.starts_with('.') && e.depth() > 0)
-                });
+            let walker = WalkDir::new(&start).into_iter().filter_entry(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                !(name.starts_with('.') && e.depth() > 0)
+            });
 
             for entry in walker {
                 let entry = match entry {
@@ -135,15 +132,16 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("grep", args).await
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("grep", args).await })
     }
 
     #[test]
     fn finds_line_with_file_and_number() {
         // 프로젝트 내 특정 패턴 검색.
-        let out = dispatch(serde_json::json!({"pattern": "fn main", "glob": "src/main.rs"})).unwrap();
+        let out =
+            dispatch(serde_json::json!({"pattern": "fn main", "glob": "src/main.rs"})).unwrap();
         assert!(out.contains("src/main.rs"));
         assert!(out.contains("fn main"));
     }
@@ -176,17 +174,19 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "fn foo() {}\n").unwrap();
         let reg = ToolRegistry::new(false);
         register(&reg);
-        let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch(
-                "grep",
-                serde_json::json!({
-                    "pattern": "fn foo",
-                    "path": dir.path().to_string_lossy(),
-                    "glob": "*.rs"
-                }),
-            )
-            .await
-        });
+        let res = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                reg.dispatch(
+                    "grep",
+                    serde_json::json!({
+                        "pattern": "fn foo",
+                        "path": dir.path().to_string_lossy(),
+                        "glob": "*.rs"
+                    }),
+                )
+                .await
+            });
         let out = res.unwrap_or_else(|e| e);
         println!("GREP FILTER OUTPUT:\n{out}");
         assert!(out.contains("a.rs"));
@@ -201,13 +201,15 @@ mod tests {
         std::fs::write(dir.path().join("real.txt"), "secret\n").unwrap();
         let reg = ToolRegistry::new(false);
         register(&reg);
-        let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch(
-                "grep",
-                serde_json::json!({"pattern": "secret", "path": dir.path().to_string_lossy()}),
-            )
-            .await
-        });
+        let res = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                reg.dispatch(
+                    "grep",
+                    serde_json::json!({"pattern": "secret", "path": dir.path().to_string_lossy()}),
+                )
+                .await
+            });
         let out = res.unwrap();
         assert!(!out.contains(".git"));
         assert!(out.contains("real.txt"));

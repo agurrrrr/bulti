@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bulti::agent::handoff::{build_handoff_prompt, NEXT_TASK_MARKER};
-use bulti::agent::loop_::{run_segment, SegmentParams, SegmentStatus};
+use bulti::agent::handoff::{NEXT_TASK_MARKER, build_handoff_prompt};
+use bulti::agent::loop_::{SegmentParams, SegmentStatus, run_segment};
 use bulti::config::EndpointConfig;
 use bulti::history::{self, RunFinish, RunStart, RunStatus};
 use bulti::llm::LlmClient;
@@ -200,7 +200,13 @@ fn test_registry(cwd: &std::path::Path) -> Arc<bulti::tools::ToolRegistry> {
     let global_dir = cwd.join("bulti_global");
     let mcp_servers = BTreeMap::new();
     let mcp_manager = Arc::new(McpManager::new());
-    native_registry(false, cwd.to_path_buf(), global_dir, mcp_servers, mcp_manager)
+    native_registry(
+        false,
+        cwd.to_path_buf(),
+        global_dir,
+        mcp_servers,
+        mcp_manager,
+    )
 }
 
 /// 기본 SegmentParams.
@@ -388,12 +394,11 @@ async fn segment_completes_without_handoff_next_task() {
 #[ignore = "실제 로컬 LLM(8084) 필요 — cargo test --test e2e_pipeline -- --ignored"]
 async fn full_pipeline_real_llm() {
     init_test_tracing();
-    let url = std::env::var("BULTI_TEST_LLM_URL")
-        .unwrap_or_else(|_| "http://localhost:8084".to_string());
+    let url =
+        std::env::var("BULTI_TEST_LLM_URL").unwrap_or_else(|_| "http://localhost:8084".to_string());
     let key = std::env::var("BULTI_TEST_LLM_KEY")
         .unwrap_or_else(|_| "Fi2MTMsg2nixdanHNC7If5LC9gpM243c".to_string());
-    let model = std::env::var("BULTI_TEST_LLM_MODEL")
-        .unwrap_or_else(|_| "qwen3.8-q2".to_string());
+    let model = std::env::var("BULTI_TEST_LLM_MODEL").unwrap_or_else(|_| "qwen3.8-q2".to_string());
 
     // 실제 LLM에 연결 가능한지 사전 점검 (없으면 skip).
     let probe = format!("{}/chat/completions", url.trim_end_matches('/'));
@@ -448,11 +453,9 @@ async fn full_pipeline_real_llm() {
     let params = SegmentParams {
         endpoint,
         temperature: None,
-        system_prompt: "당신은 파일을 작성하는 자동화 에이전트입니다. "
-            .to_string()
+        system_prompt: "당신은 파일을 작성하는 자동화 에이전트입니다. ".to_string()
             + "프롬프트의 지시를 수행한 뒤 간결하게 결과를 보고하세요.",
-        user_prompt: "write_file 도구로 mock_real.txt 에 'real-llm' 내용을 작성하고, "
-            .to_string()
+        user_prompt: "write_file 도구로 mock_real.txt 에 'real-llm' 내용을 작성하고, ".to_string()
             + "완료되었으면 보고하세요.",
         max_iterations: 20,
         context_tokens: 4096,
@@ -497,8 +500,8 @@ async fn full_pipeline_real_llm() {
 /// 순서를 흉내내고, 세션 연결 기록·파일 터치·정상 종료(exit 0)를 검증한다.
 #[tokio::test]
 async fn chat_turn_end_to_end() {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     use bulti::cli::chat_cmd::run_turn;
     use bulti::config::{Config, ContextConfig};
@@ -571,8 +574,8 @@ async fn chat_turn_end_to_end() {
 /// 에 누적해 반환하는지 검증한다.
 #[tokio::test]
 async fn chat_turn_reasoning_content_end_to_end() {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     use bulti::cli::chat_cmd::run_turn;
     use bulti::config::{Config, ContextConfig};

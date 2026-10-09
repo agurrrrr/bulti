@@ -4,21 +4,19 @@ use serde_json::Value;
 
 /// 인자에서 문자열 필드를 추출한다. 없거나 타입이 다르면 None.
 pub fn str_arg(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// 인자에서 정수 필드를 추출한다. 없으면 기본값.
 pub fn int_arg(args: &Value, key: &str, default: u64) -> u64 {
-    args.get(key)
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default)
+    args.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
 }
 
 /// 인자에서 불리언 필드를 추출한다. 없으면 기본값.
 pub fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
-    args.get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
 /// 툴 결과 공통 절단 (DESIGN.md §4.5.2).

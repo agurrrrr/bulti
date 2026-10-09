@@ -126,10 +126,7 @@ mod tests {
     fn schema_has_required_fields() {
         let s = schema();
         let required = s["required"].as_array().unwrap();
-        let names: Vec<&str> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(names.contains(&"server"));
         assert!(names.contains(&"tool"));
         assert!(names.contains(&"args"));
@@ -137,8 +134,12 @@ mod tests {
 
     #[test]
     fn detects_schema_mismatch_hints() {
-        assert!(looks_like_schema_mismatch("invalid params: missing required field"));
-        assert!(looks_like_schema_mismatch("validation failed: unexpected value"));
+        assert!(looks_like_schema_mismatch(
+            "invalid params: missing required field"
+        ));
+        assert!(looks_like_schema_mismatch(
+            "validation failed: unexpected value"
+        ));
         assert!(!looks_like_schema_mismatch("tool execution error"));
     }
 

@@ -59,7 +59,9 @@ pub fn register_list(reg: &ToolRegistry) {
             } else {
                 let q = query.as_str();
                 rows.into_iter()
-                    .filter(|r| r.prompt.contains(q) || r.result.as_deref().unwrap_or("").contains(q))
+                    .filter(|r| {
+                        r.prompt.contains(q) || r.result.as_deref().unwrap_or("").contains(q)
+                    })
                     .collect()
             };
             let mut out = String::new();

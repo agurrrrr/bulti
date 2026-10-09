@@ -94,9 +94,9 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("glob", args).await
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("glob", args).await })
     }
 
     #[test]
@@ -127,9 +127,15 @@ mod tests {
         // cwd 변경 없이 상대 패턴은 프로젝트 루트 기준이므로, 절대 경로로 검증.
         let reg = ToolRegistry::new(false);
         register(&reg);
-        let res = tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("glob", serde_json::json!({"pattern": dir.path().join("**/*").to_string_lossy()})).await
-        });
+        let res = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                reg.dispatch(
+                    "glob",
+                    serde_json::json!({"pattern": dir.path().join("**/*").to_string_lossy()}),
+                )
+                .await
+            });
         let out = res.unwrap();
         println!("GLOB GIT OUTPUT:\n{out}");
         assert!(!out.contains(".git"));

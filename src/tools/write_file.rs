@@ -41,9 +41,11 @@ pub fn register(reg: &ToolRegistry) {
                         .map_err(|e| format!("write_file: 디렉터리 생성 실패: {e}"))?;
                 }
             }
-            std::fs::write(path, &content)
-                .map_err(|e| format!("write_file: 쓰기 실패: {e}"))?;
-            Ok(format!("파일을 작성했습니다: {path_str} ({}자)", content.chars().count()))
+            std::fs::write(path, &content).map_err(|e| format!("write_file: 쓰기 실패: {e}"))?;
+            Ok(format!(
+                "파일을 작성했습니다: {path_str} ({}자)",
+                content.chars().count()
+            ))
         })
     });
     reg.register(
@@ -61,9 +63,9 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("write_file", args).await
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("write_file", args).await })
     }
 
     #[test]

@@ -67,8 +67,8 @@ pub fn register(reg: &ToolRegistry) {
             if !path.exists() {
                 return Err(format!("edit_file: 파일을 찾을 수 없습니다: {path_str}"));
             }
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("edit_file: 읽기 실패: {e}"))?;
+            let content =
+                std::fs::read_to_string(path).map_err(|e| format!("edit_file: 읽기 실패: {e}"))?;
 
             // 유니코드 혼동 문자 경고.
             let warning = unicode_warning(&find);
@@ -97,12 +97,10 @@ pub fn register(reg: &ToolRegistry) {
                 content.replacen(&find, &replace, 1)
             };
 
-            std::fs::write(path, &new_content)
-                .map_err(|e| format!("edit_file: 쓰기 실패: {e}"))?;
+            std::fs::write(path, &new_content).map_err(|e| format!("edit_file: 쓰기 실패: {e}"))?;
 
-            let mut msg = format!(
-                "편집 완료: {path_str} — {count}곳 치환 (replace_all={replace_all})"
-            );
+            let mut msg =
+                format!("편집 완료: {path_str} — {count}곳 치환 (replace_all={replace_all})");
             if let Some(w) = warning {
                 msg.push('\n');
                 msg.push_str(&w);
@@ -133,9 +131,9 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("edit_file", args).await
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("edit_file", args).await })
     }
 
     #[test]
@@ -143,7 +141,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("e.txt");
         std::fs::write(&p, "hello world").unwrap();
-        let res = dispatch(serde_json::json!({"path": p.to_string_lossy(), "find": "hello", "replace": "hi"}));
+        let res = dispatch(
+            serde_json::json!({"path": p.to_string_lossy(), "find": "hello", "replace": "hi"}),
+        );
         assert!(res.is_ok());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hi world");
     }
@@ -153,7 +153,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("m.txt");
         std::fs::write(&p, "a b a c").unwrap();
-        let res = dispatch(serde_json::json!({"path": p.to_string_lossy(), "find": "a", "replace": "x"}));
+        let res =
+            dispatch(serde_json::json!({"path": p.to_string_lossy(), "find": "a", "replace": "x"}));
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("replace_all"));
     }
@@ -163,7 +164,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("r.txt");
         std::fs::write(&p, "a b a c").unwrap();
-        let res = dispatch(serde_json::json!({"path": p.to_string_lossy(), "find": "a", "replace": "x", "replace_all": true}));
+        let res = dispatch(
+            serde_json::json!({"path": p.to_string_lossy(), "find": "a", "replace": "x", "replace_all": true}),
+        );
         assert!(res.is_ok());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "x b x c");
     }
@@ -173,7 +176,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("n.txt");
         std::fs::write(&p, "content").unwrap();
-        let res = dispatch(serde_json::json!({"path": p.to_string_lossy(), "find": "zzz", "replace": "x"}));
+        let res = dispatch(
+            serde_json::json!({"path": p.to_string_lossy(), "find": "zzz", "replace": "x"}),
+        );
         assert!(res.is_err());
     }
 
@@ -185,7 +190,8 @@ mod tests {
 
     #[test]
     fn missing_file_is_error() {
-        let res = dispatch(serde_json::json!({"path": "/nonexistent", "find": "a", "replace": "b"}));
+        let res =
+            dispatch(serde_json::json!({"path": "/nonexistent", "find": "a", "replace": "b"}));
         assert!(res.is_err());
     }
 }

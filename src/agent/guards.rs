@@ -180,7 +180,10 @@ mod tests {
     #[test]
     fn stream_repetition_positive_8_same_short_line() {
         let text = "ok\nok\nok\nok\nok\nok\nok\nok\n";
-        assert!(matches!(check_stream_repetition(text), GuardOutcome::Trigger(_)));
+        assert!(matches!(
+            check_stream_repetition(text),
+            GuardOutcome::Trigger(_)
+        ));
     }
 
     #[test]
@@ -204,17 +207,24 @@ mod tests {
         for _ in 0..4 {
             ctx.recent_signatures.push("bash:{command:ls}".to_string());
         }
-        assert!(matches!(check_stuck_signature(&ctx), GuardOutcome::Trigger(_)));
+        assert!(matches!(
+            check_stuck_signature(&ctx),
+            GuardOutcome::Trigger(_)
+        ));
     }
 
     #[test]
     fn stuck_signature_negative_progress() {
         // read_file 페이징: offset이 달라 시그니처가 다르므로 정상 통과
         let mut ctx = GuardContext::default();
-        ctx.recent_signatures.push("read_file:{path:a,offset:0}".to_string());
-        ctx.recent_signatures.push("read_file:{path:a,offset:200}".to_string());
-        ctx.recent_signatures.push("read_file:{path:a,offset:400}".to_string());
-        ctx.recent_signatures.push("read_file:{path:a,offset:600}".to_string());
+        ctx.recent_signatures
+            .push("read_file:{path:a,offset:0}".to_string());
+        ctx.recent_signatures
+            .push("read_file:{path:a,offset:200}".to_string());
+        ctx.recent_signatures
+            .push("read_file:{path:a,offset:400}".to_string());
+        ctx.recent_signatures
+            .push("read_file:{path:a,offset:600}".to_string());
         assert_eq!(check_stuck_signature(&ctx), GuardOutcome::Pass);
     }
 
@@ -233,7 +243,10 @@ mod tests {
     fn fffd_positive_high_ratio() {
         // 20 룬 이상, FFFD 비율 ≥ 0.2
         let content = "\u{FFFD}".repeat(20); // 20개 전부 FFFD → 비율 1.0
-        assert!(matches!(check_fffd_degenerate(&content), GuardOutcome::Trigger(_)));
+        assert!(matches!(
+            check_fffd_degenerate(&content),
+            GuardOutcome::Trigger(_)
+        ));
     }
 
     #[test]
@@ -270,7 +283,10 @@ mod tests {
             bash_called: true, // bash 호출했으므로 build gate 통과
             ..GuardContext::default()
         };
-        assert_eq!(check_build_gate(&ctx, "빌드가 통과했습니다."), GuardOutcome::Pass);
+        assert_eq!(
+            check_build_gate(&ctx, "빌드가 통과했습니다."),
+            GuardOutcome::Pass
+        );
     }
 
     #[test]
@@ -279,7 +295,10 @@ mod tests {
             code_modified: false,
             ..GuardContext::default()
         };
-        assert_eq!(check_build_gate(&ctx, "빌드가 통과했습니다."), GuardOutcome::Pass);
+        assert_eq!(
+            check_build_gate(&ctx, "빌드가 통과했습니다."),
+            GuardOutcome::Pass
+        );
     }
 
     // ── pause-summary (#6690) ──
@@ -301,7 +320,10 @@ mod tests {
     #[test]
     fn pause_summary_negative_normal() {
         let ctx = GuardContext::default();
-        assert_eq!(check_pause_summary(&ctx, "모든 작업이 완료되었습니다."), GuardOutcome::Pass);
+        assert_eq!(
+            check_pause_summary(&ctx, "모든 작업이 완료되었습니다."),
+            GuardOutcome::Pass
+        );
     }
 
     #[test]
@@ -328,7 +350,10 @@ mod tests {
         update_after_tool_call(&mut ctx, "bash:ls".to_string(), false);
         update_after_tool_call(&mut ctx, "bash:ls".to_string(), false);
         assert_eq!(ctx.recent_signatures.len(), 4);
-        assert!(matches!(check_stuck_signature(&ctx), GuardOutcome::Trigger(_)));
+        assert!(matches!(
+            check_stuck_signature(&ctx),
+            GuardOutcome::Trigger(_)
+        ));
     }
 
     #[test]

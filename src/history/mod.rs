@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::config::Config;
@@ -272,7 +272,8 @@ pub fn list_runs(
     let mut sql = "SELECT id, started_at, finished_at, cwd, endpoint, model, status, prompt,
         result, chain_id, session_id, segment_index, handoff_depth, parent_run_id,
         input_tokens, output_tokens, files_touched, duration_ms
-        FROM runs".to_string();
+        FROM runs"
+        .to_string();
     let mut conds: Vec<String> = Vec::new();
     let mut args: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(s) = status {
@@ -342,9 +343,7 @@ pub fn last_run(conn: &Connection, chain: Option<&str>) -> Result<Option<RunRow>
 /// `files_touched` JSON 을 문자열 배열로 파싱한다.
 pub fn parse_files_touched(json: Option<&str>) -> Vec<String> {
     match json {
-        Some(s) if !s.is_empty() => {
-            serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
-        }
+        Some(s) if !s.is_empty() => serde_json::from_str::<Vec<String>>(s).unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -415,7 +414,10 @@ mod tests {
         assert_eq!(row.output_tokens, Some(50));
         assert_eq!(row.duration_ms, Some(1234));
         assert!(row.finished_at.is_some());
-        assert_eq!(parse_files_touched(row.files_touched.as_deref()), vec!["src/x.rs"]);
+        assert_eq!(
+            parse_files_touched(row.files_touched.as_deref()),
+            vec!["src/x.rs"]
+        );
     }
 
     /// 핸드오프 세그먼트 insert 가 `parent_run_id`로 이어진다.
@@ -454,32 +456,44 @@ mod tests {
         let a = run_start(&conn, "chain-a", 0, 0);
         let b = run_start(&conn, "chain-b", 0, 0);
         let c = run_start(&conn, "chain-a", 1, 1);
-        finish_run(&conn, a, &RunFinish {
-            status: RunStatus::Completed,
-            result: Some("r1".to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            files_touched: vec![],
-            duration_ms: None,
-        })
+        finish_run(
+            &conn,
+            a,
+            &RunFinish {
+                status: RunStatus::Completed,
+                result: Some("r1".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                files_touched: vec![],
+                duration_ms: None,
+            },
+        )
         .unwrap();
-        finish_run(&conn, b, &RunFinish {
-            status: RunStatus::Failed,
-            result: Some("r2".to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            files_touched: vec![],
-            duration_ms: None,
-        })
+        finish_run(
+            &conn,
+            b,
+            &RunFinish {
+                status: RunStatus::Failed,
+                result: Some("r2".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                files_touched: vec![],
+                duration_ms: None,
+            },
+        )
         .unwrap();
-        finish_run(&conn, c, &RunFinish {
-            status: RunStatus::Completed,
-            result: Some("r3".to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            files_touched: vec![],
-            duration_ms: None,
-        })
+        finish_run(
+            &conn,
+            c,
+            &RunFinish {
+                status: RunStatus::Completed,
+                result: Some("r3".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                files_touched: vec![],
+                duration_ms: None,
+            },
+        )
         .unwrap();
 
         // 전체 목록 (id desc)
@@ -508,23 +522,31 @@ mod tests {
         let (conn, _dir) = temp_conn();
         let a = run_start(&conn, "chain-a", 0, 0);
         let b = run_start(&conn, "chain-b", 0, 0);
-        finish_run(&conn, a, &RunFinish {
-            status: RunStatus::Completed,
-            result: Some("r1".to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            files_touched: vec![],
-            duration_ms: None,
-        })
+        finish_run(
+            &conn,
+            a,
+            &RunFinish {
+                status: RunStatus::Completed,
+                result: Some("r1".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                files_touched: vec![],
+                duration_ms: None,
+            },
+        )
         .unwrap();
-        finish_run(&conn, b, &RunFinish {
-            status: RunStatus::Completed,
-            result: Some("r2".to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            files_touched: vec![],
-            duration_ms: None,
-        })
+        finish_run(
+            &conn,
+            b,
+            &RunFinish {
+                status: RunStatus::Completed,
+                result: Some("r2".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                files_touched: vec![],
+                duration_ms: None,
+            },
+        )
         .unwrap();
 
         let last = last_run(&conn, None).unwrap().unwrap();

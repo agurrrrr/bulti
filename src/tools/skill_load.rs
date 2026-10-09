@@ -71,10 +71,7 @@ mod tests {
         let reg = crate::tools::ToolRegistry::new(false);
         register(&reg, root.clone(), root.clone());
         let res = reg
-            .dispatch(
-                "skill_load",
-                serde_json::json!({"name": "korean-report"}),
-            )
+            .dispatch("skill_load", serde_json::json!({"name": "korean-report"}))
             .await;
         let out = res.unwrap();
         assert!(out.contains("한국어 보고"));

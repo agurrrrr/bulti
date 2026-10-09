@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::{CallToolRequestParams, ContentBlock};
-use rmcp::service::{serve_client, RoleClient, RunningService};
+use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::child_process::TokioChildProcess;
 use tokio::process::Command;
 
@@ -204,7 +204,10 @@ impl McpClient {
         }
 
         // content(text) 우선, 비면 structuredContent 원본 JSON 폴백 (shepherd #6350).
-        Ok(parse_tool_result(&result.content, result.structured_content.as_ref()))
+        Ok(parse_tool_result(
+            &result.content,
+            result.structured_content.as_ref(),
+        ))
     }
 
     /// 서버 툴 이름 목록을 반환한다 (스키마 옵트인 주입용).
@@ -228,7 +231,8 @@ impl McpClient {
             .map(|t| ToolSchema {
                 name: t.name.to_string(),
                 description: t.description.as_deref().unwrap_or("").to_string(),
-                input_schema: serde_json::to_value(&t.input_schema).unwrap_or(serde_json::json!({})),
+                input_schema: serde_json::to_value(&t.input_schema)
+                    .unwrap_or(serde_json::json!({})),
             })
             .collect())
     }
@@ -320,7 +324,10 @@ mod tests {
     fn summarize_schema_ignores_required_null() {
         let mut map = serde_json::Map::new();
         map.insert("type".into(), json!("object"));
-        map.insert("properties".into(), json!({"a": {"type": "string"}, "b": {"type": "number"}}));
+        map.insert(
+            "properties".into(),
+            json!({"a": {"type": "string"}, "b": {"type": "number"}}),
+        );
         map.insert("required".into(), serde_json::Value::Null);
         let s = summarize_schema(&map);
         assert_eq!(s, "a, b");
@@ -338,10 +345,7 @@ mod tests {
     /// text 블록만 합친다 (이미지·리소스 블록은 무시).
     #[test]
     fn extract_text_joins_text_blocks() {
-        let content = vec![
-            ContentBlock::text("hello"),
-            ContentBlock::text(" world"),
-        ];
+        let content = vec![ContentBlock::text("hello"), ContentBlock::text(" world")];
         assert_eq!(extract_text(&content), "hello world");
     }
 
@@ -350,7 +354,10 @@ mod tests {
     fn parse_tool_result_prefers_text_content() {
         let content = vec![ContentBlock::text("text result")];
         let structured = json!({"key": "value"});
-        assert_eq!(parse_tool_result(&content, Some(&structured)), "text result");
+        assert_eq!(
+            parse_tool_result(&content, Some(&structured)),
+            "text result"
+        );
     }
 
     /// content(text)가 비어 있으면 structuredContent 원본 JSON 을 폴백으로 반환한다 (shepherd #6350).
@@ -389,7 +396,10 @@ mod tests {
         };
         let client = McpClient::new(config);
         let guard = client.running.lock().unwrap();
-        assert!(guard.is_none(), "new() 시점에는 프로세스를 띄우지 않아야 한다");
+        assert!(
+            guard.is_none(),
+            "new() 시점에는 프로세스를 띄우지 않아야 한다"
+        );
     }
 
     /// McpManager::client 는 클라이언트를 만들 뿐 spawn 하지 않는다.
@@ -405,7 +415,10 @@ mod tests {
         };
         let a = manager.client("srv", &config);
         let b = manager.client("srv", &config);
-        assert!(Arc::ptr_eq(&a, &b), "같은 서버는 같은 클라이언트 인스턴스를 반환해야 한다");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "같은 서버는 같은 클라이언트 인스턴스를 반환해야 한다"
+        );
         // 여전히 spawn 되지 않았음을 확인.
         let guard = a.running.lock().unwrap();
         assert!(guard.is_none(), "client() 는 spawn 을 수행하지 않아야 한다");

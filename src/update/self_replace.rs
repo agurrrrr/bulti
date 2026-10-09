@@ -6,12 +6,11 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 
 /// 현재 실행 중인 바이너리 경로.
 fn current_exe() -> Result<std::path::PathBuf> {
-    std::env::current_exe()
-        .map_err(|e| anyhow!("현재 실행 파일 경로를 확인할 수 없습니다: {e}"))
+    std::env::current_exe().map_err(|e| anyhow!("현재 실행 파일 경로를 확인할 수 없습니다: {e}"))
 }
 
 /// 새 바이너리를 현재 실행 경로에 교체한다.
@@ -48,7 +47,9 @@ pub fn replace(new_binary: &Path) -> Result<()> {
             // Windows 등에서 대상이 존재해 실패한 경우: 원본 삭제 후 재시도.
             let _ = fs::remove_file(&exe);
             fs::rename(&tmp, &exe)
-                .with_context(|| format!("바이너리 교체 실패: {} -> {}", tmp.display(), exe.display()))
+                .with_context(|| {
+                    format!("바이너리 교체 실패: {} -> {}", tmp.display(), exe.display())
+                })
                 .inspect_err(|_| {
                     let _ = fs::remove_file(&tmp);
                 })

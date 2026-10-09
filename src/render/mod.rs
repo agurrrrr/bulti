@@ -476,15 +476,23 @@ pub fn render_lines(blocks: &[Block]) -> Vec<Line<'static>> {
                         code_style(),
                     )]));
                 }
-                let bottom = if *open { "▌" } else { "└──────" };
+                let bottom = if *open {
+                    "▌"
+                } else {
+                    "└──────"
+                };
                 out.push(Line::from(vec![Span::styled(bottom, code_box_style())]));
             }
             Block::Table { header, rows } => {
                 let widths = table_widths(header, rows);
                 // 상단 구분선
-                let total: usize = widths.iter().sum::<usize>() + (3 * widths.len().saturating_sub(1)) + 2;
+                let total: usize =
+                    widths.iter().sum::<usize>() + (3 * widths.len().saturating_sub(1)) + 2;
                 let top_sep: String = "─".repeat(total);
-                out.push(Line::from(vec![Span::styled(format!("┌{top_sep}┐"), table_style())]));
+                out.push(Line::from(vec![Span::styled(
+                    format!("┌{top_sep}┐"),
+                    table_style(),
+                )]));
                 // 헤더
                 out.push(Line::from(vec![Span::styled(
                     format_table_row(header, &widths),
@@ -492,7 +500,10 @@ pub fn render_lines(blocks: &[Block]) -> Vec<Line<'static>> {
                 )]));
                 // 헤더/데이터 구분선
                 let mid_sep: String = "─".repeat(total);
-                out.push(Line::from(vec![Span::styled(format!("├{mid_sep}┤"), table_style())]));
+                out.push(Line::from(vec![Span::styled(
+                    format!("├{mid_sep}┤"),
+                    table_style(),
+                )]));
                 for row in rows {
                     out.push(Line::from(vec![Span::styled(
                         format_table_row(row, &widths),
@@ -501,11 +512,17 @@ pub fn render_lines(blocks: &[Block]) -> Vec<Line<'static>> {
                 }
                 // 하단 구분선
                 let bot_sep: String = "─".repeat(total);
-                out.push(Line::from(vec![Span::styled(format!("└{bot_sep}┘"), table_style())]));
+                out.push(Line::from(vec![Span::styled(
+                    format!("└{bot_sep}┘"),
+                    table_style(),
+                )]));
             }
             Block::List { items } => {
                 for item in items.iter() {
-                    let mut spans = vec![Span::styled("•", Style::default().fg(Color::Yellow)), Span::raw(" ".to_string())];
+                    let mut spans = vec![
+                        Span::styled("•", Style::default().fg(Color::Yellow)),
+                        Span::raw(" ".to_string()),
+                    ];
                     spans.extend(inline_spans(item));
                     out.push(Line::from(spans));
                 }
@@ -521,7 +538,9 @@ pub fn render_lines(blocks: &[Block]) -> Vec<Line<'static>> {
                     3 => Style::default()
                         .fg(Color::Blue)
                         .add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    _ => Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 };
                 let joined = inline_plain(text);
                 let prefix = "#".repeat(*level as usize);
@@ -668,13 +687,21 @@ mod tests {
     #[test]
     fn parses_inline_code() {
         let inlines = parse_inline("use `std::io` here");
-        assert!(inlines.iter().any(|i| matches!(i, Inline::Code(c) if c == "std::io")));
+        assert!(
+            inlines
+                .iter()
+                .any(|i| matches!(i, Inline::Code(c) if c == "std::io"))
+        );
     }
 
     #[test]
     fn unclosed_inline_code_still_renders() {
         let inlines = parse_inline("use `std");
-        assert!(inlines.iter().any(|i| matches!(i, Inline::Code(c) if c == "std")));
+        assert!(
+            inlines
+                .iter()
+                .any(|i| matches!(i, Inline::Code(c) if c == "std"))
+        );
     }
 
     #[test]
@@ -697,14 +724,8 @@ mod tests {
         match &blocks[0] {
             Block::List { items } => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(
-                    items[0],
-                    vec![Inline::Text("one".to_string())]
-                );
-                assert_eq!(
-                    items[1],
-                    vec![Inline::Text("two".to_string())]
-                );
+                assert_eq!(items[0], vec![Inline::Text("one".to_string())]);
+                assert_eq!(items[1], vec![Inline::Text("two".to_string())]);
             }
             other => panic!("expected list, got {other:?}"),
         }

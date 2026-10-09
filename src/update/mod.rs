@@ -8,13 +8,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{UpdateMode, CONFIG_DIR_NAME};
+use crate::config::{CONFIG_DIR_NAME, UpdateMode};
 
-pub mod semver_util;
 pub mod self_replace;
+pub mod semver_util;
 
 /// 빌드 시 주입되는 기본 저장소 (DESIGN.md §4.11). `BULTI_REPO` env 가 있으면 그 값을 사용한다.
 pub const DEFAULT_REPO: &str = match option_env!("BULTI_REPO") {
@@ -263,10 +263,7 @@ pub fn is_newer(tag: &str) -> bool {
 
 /// asset 매칭: 빌드 타깃 트리플을 포함하는 asset 이름을 찾는다.
 fn find_asset<'a>(release: &'a Release, triple: &str) -> Option<&'a Asset> {
-    release
-        .assets
-        .iter()
-        .find(|a| a.name.contains(triple))
+    release.assets.iter().find(|a| a.name.contains(triple))
 }
 
 /// 다운로드 대상 파일이 존재하는지 확인하고, 존재하면 다운로드한다.
@@ -283,8 +280,10 @@ fn download(url: &str, dest: &Path) -> Result<()> {
     if !resp.status().is_success() {
         bail!("다운로드 응답 오류: {}", resp.status());
     }
-    let mut f = fs::File::create(dest).with_context(|| format!("파일 생성 실패: {}", dest.display()))?;
-    std::io::copy(&mut resp, &mut f).with_context(|| format!("파일 저장 실패: {}", dest.display()))?;
+    let mut f =
+        fs::File::create(dest).with_context(|| format!("파일 생성 실패: {}", dest.display()))?;
+    std::io::copy(&mut resp, &mut f)
+        .with_context(|| format!("파일 저장 실패: {}", dest.display()))?;
     Ok(())
 }
 
@@ -292,7 +291,8 @@ fn download(url: &str, dest: &Path) -> Result<()> {
 fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     use sha2::{Digest, Sha256};
 
-    let mut file = fs::File::open(path).with_context(|| format!("해시 검증 파일 열기 실패: {}", path.display()))?;
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("해시 검증 파일 열기 실패: {}", path.display()))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).with_context(|| "해시 계산 실패")?;
     let actual = hasher.finalize();
@@ -345,10 +345,7 @@ fn download_and_install(repo: &str) -> Result<PathBuf> {
     download(&asset.browser_download_url, &archive_path)?;
 
     // checksums.txt 검증.
-    let checksum_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == "checksums.txt");
+    let checksum_asset = release.assets.iter().find(|a| a.name == "checksums.txt");
     if let Some(cs) = checksum_asset {
         let cs_path = tmp_dir.path().join("checksums.txt");
         download(&cs.browser_download_url, &cs_path)?;
@@ -365,7 +362,8 @@ fn download_and_install(repo: &str) -> Result<PathBuf> {
     extract_tar_gz(&archive_path, &extract_dir)?;
 
     // 바이너리 경로: 해제된 디렉터리에서 bulti 실행 파일.
-    let bin_path = find_binary(&extract_dir).ok_or_else(|| anyhow!("해제된 아카이브에서 bulti 바이너리를 찾지 못했습니다."))?;
+    let bin_path = find_binary(&extract_dir)
+        .ok_or_else(|| anyhow!("해제된 아카이브에서 bulti 바이너리를 찾지 못했습니다."))?;
     set_executable(&bin_path)?;
 
     Ok(bin_path.to_path_buf())
@@ -373,7 +371,8 @@ fn download_and_install(repo: &str) -> Result<PathBuf> {
 
 /// tar.gz 아카이브를 해제한다.
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
-    let file = fs::File::open(archive).with_context(|| format!("아카이브 열기 실패: {}", archive.display()))?;
+    let file = fs::File::open(archive)
+        .with_context(|| format!("아카이브 열기 실패: {}", archive.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(gz);
     tar.unpack(dest)
@@ -401,7 +400,9 @@ fn set_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(path).context("메타데이터 읽기 실패")?.permissions();
+        let mut perm = fs::metadata(path)
+            .context("메타데이터 읽기 실패")?
+            .permissions();
         perm.set_mode(0o755);
         fs::set_permissions(path, perm).context("실행 비트 설정 실패")?;
     }
@@ -537,8 +538,14 @@ mod tests {
 
     #[test]
     fn release_url_uses_full_url_when_http() {
-        assert_eq!(release_url("http://localhost:1234/releases/latest"), "http://localhost:1234/releases/latest");
-        assert_eq!(release_url("https://example.com/releases/latest"), "https://example.com/releases/latest");
+        assert_eq!(
+            release_url("http://localhost:1234/releases/latest"),
+            "http://localhost:1234/releases/latest"
+        );
+        assert_eq!(
+            release_url("https://example.com/releases/latest"),
+            "https://example.com/releases/latest"
+        );
     }
 
     #[test]

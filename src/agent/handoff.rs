@@ -97,7 +97,11 @@ impl HandoffDepthGuard {
 /// 트리거 판정 (§4.6.1).
 ///
 /// `estimate(messages) ≥ context_tokens × threshold_pct/100` 이면 핸드오프 시도.
-pub fn should_attempt_handoff(messages: &[Message], context_tokens: u64, threshold_pct: u8) -> bool {
+pub fn should_attempt_handoff(
+    messages: &[Message],
+    context_tokens: u64,
+    threshold_pct: u8,
+) -> bool {
     if context_tokens == 0 {
         return false;
     }
@@ -575,10 +579,7 @@ mod tests {
         // ctx=4096, threshold=75% → 3072토큰 이상이면 트리거. ASCII 4:1 압축이므로
         // 12288자 이상 필요. 13000 ASCII → 3250토큰(≥3072) → 트리거.
         let big_user = "x".repeat(13000);
-        let messages = vec![
-            msg("system", "sys"),
-            msg("user", &big_user),
-        ];
+        let messages = vec![msg("system", "sys"), msg("user", &big_user)];
         assert!(should_attempt_handoff(&messages, 4096, 75));
 
         // ── handoff 요청 (도구 없이) ──

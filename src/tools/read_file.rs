@@ -66,7 +66,10 @@ pub fn schema() -> serde_json::Value {
 /// 이미지 확장자 판별.
 fn is_image(path: &std::path::Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
-        Some(e) => matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"),
+        Some(e) => matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp"
+        ),
         None => false,
     }
 }
@@ -109,7 +112,9 @@ pub fn register(reg: &ToolRegistry) {
                 return Err(format!("read_file: 파일을 찾을 수 없습니다: {path_str}"));
             }
             if path.is_dir() {
-                return Err(format!("read_file: 디렉터리는 읽을 수 없습니다: {path_str}"));
+                return Err(format!(
+                    "read_file: 디렉터리는 읽을 수 없습니다: {path_str}"
+                ));
             }
 
             // 비전 엔드포인트 + 이미지 → base64 image_url content.
@@ -117,8 +122,8 @@ pub fn register(reg: &ToolRegistry) {
                 return image_content(path);
             }
 
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("read_file: 읽기 실패: {e}"))?;
+            let content =
+                std::fs::read_to_string(path).map_err(|e| format!("read_file: 읽기 실패: {e}"))?;
             let lines: Vec<&str> = content.lines().collect();
             let total = lines.len() as u64;
 
@@ -127,7 +132,9 @@ pub fn register(reg: &ToolRegistry) {
                 Some(o) => o,
                 None => {
                     let st = state().lock().unwrap();
-                    let next = st.as_ref().and_then(|s| s.next_offset.get(&path_str).copied());
+                    let next = st
+                        .as_ref()
+                        .and_then(|s| s.next_offset.get(&path_str).copied());
                     next.unwrap_or(1)
                 }
             };
@@ -135,10 +142,15 @@ pub fn register(reg: &ToolRegistry) {
             // 이미 마지막까지 읽었고 offset 없이 재호출 → 고정 메시지 (page 1 wrap 방지).
             if offset_arg.is_none() {
                 let st = state().lock().unwrap();
-                let total_known = st.as_ref().and_then(|s| s.total_lines.get(&path_str).copied());
+                let total_known = st
+                    .as_ref()
+                    .and_then(|s| s.total_lines.get(&path_str).copied());
                 if let Some(t) = total_known {
                     if offset > 1 && offset >= t {
-                        return Ok("(이미 파일 전체를 읽었습니다. 편집 후 재읽기는 offset을 명시하세요.)".to_string());
+                        return Ok(
+                            "(이미 파일 전체를 읽었습니다. 편집 후 재읽기는 offset을 명시하세요.)"
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -153,7 +165,12 @@ pub fn register(reg: &ToolRegistry) {
             let mut buf = String::new();
 
             let start_idx = (offset - 1) as usize;
-            for (i, line) in lines.iter().enumerate().skip(start_idx).take(limit as usize) {
+            for (i, line) in lines
+                .iter()
+                .enumerate()
+                .skip(start_idx)
+                .take(limit as usize)
+            {
                 let line_no = (i as u64) + 1;
                 let prefix_len = line_no.to_string().len() + 1; // "N→" 길이
                 let line_char = prefix_len as u64 + line.chars().count() as u64;
@@ -168,15 +185,14 @@ pub fn register(reg: &ToolRegistry) {
             {
                 let mut st = state().lock().unwrap();
                 let st = st.get_or_insert_with(ReadState::new);
-                st.next_offset.insert(path_str.clone(), last_printed_line + 1);
+                st.next_offset
+                    .insert(path_str.clone(), last_printed_line + 1);
                 st.total_lines.insert(path_str.clone(), total);
             }
 
             // 푸터 (절단 상한보다 작은 예산 안에서).
             let footer = if last_printed_line >= total {
-                format!(
-                    "[File has {total} lines. Showing lines {offset}-{total}]"
-                )
+                format!("[File has {total} lines. Showing lines {offset}-{total}]")
             } else {
                 format!(
                     "[File has {total} lines. Showing lines {offset}-{last_printed_line}. Call read_file with offset={} to read more.]",
@@ -202,13 +218,16 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> Result<String, String> {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            reg.dispatch("read_file", args).await
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("read_file", args).await })
     }
 
     fn write_test_file(dir: &std::path::Path, name: &str, lines: usize) -> String {
-        let content: String = (1..=lines).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=lines)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
         path.to_string_lossy().to_string()
@@ -268,7 +287,10 @@ mod tests {
         // 두 번째 호출은 11부터 시작해야 한다 (auto-advance). "1→line 1"은
         // "11→line 11"의 부분 문자열이므로, 대신 첫 줄이 11부터인지 검사한다.
         assert!(second.contains("11→line 11"));
-        assert!(!second.contains("1→line 1\n"), "두 번째 호출이 1부터 다시 시작함");
+        assert!(
+            !second.contains("1→line 1\n"),
+            "두 번째 호출이 1부터 다시 시작함"
+        );
         assert!(second.trim().starts_with("11→line 11"));
     }
 
@@ -294,9 +316,15 @@ mod tests {
         ];
         let img_path = dir.path().join("img.png");
         std::fs::write(&img_path, png).unwrap();
-        let res = tokio::runtime::Runtime::new().unwrap().block_on(
-            async move { reg.dispatch("read_file", serde_json::json!({"path": img_path.to_string_lossy()})).await },
-        );
+        let res = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                reg.dispatch(
+                    "read_file",
+                    serde_json::json!({"path": img_path.to_string_lossy()}),
+                )
+                .await
+            });
         assert!(res.is_ok());
         let out = res.unwrap();
         assert!(out.contains("data:image/png;base64,"));

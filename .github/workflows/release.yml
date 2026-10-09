@@ -1,0 +1,104 @@
+name: Release
+
+# v* 태그를 push 하면 여러 플랫폼용 정적 바이너리를 빌드해 GitHub Release에 올린다.
+# 산출물 이름은 update 모듈(src/update/mod.rs)의 자산 규칙과 정확히 맞춘다:
+#   bulti-{arch}-{os}-{env}.tar.gz   (예: bulti-aarch64-linux-gnu.tar.gz)
+# tarball 최상위에는 `bulti` 실행 파일이 있어야 하고, checksums.txt 로 sha256 을 검증한다.
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    # 각 타깃은 해당 아키텍처의 네이티브 러너에서 빌드한다.
+    # rusqlite bundled(C 컴파일)와 rustls/ring 은 네이티브 빌드에서 가장 안전하다.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64-linux-gnu
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            musl: false
+          - label: x86_64-linux-musl
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            musl: true
+          - label: aarch64-linux-gnu
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            musl: false
+          - label: aarch64-linux-musl
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            musl: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl 타깃은 musl-tools(musl-gcc)가 필요하다. 러너가 이미 해당 아키텍처이므로 네이티브 컴파일이다.
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tar.gz
+        run: |
+          mkdir -p dist
+          tar -C target/${{ matrix.target }}/release -czf dist/bulti-${{ matrix.label }}.tar.gz bulti
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: dist/*.tar.gz
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+          merge-multiple: true
+
+      - name: Generate checksums.txt
+        working-directory: dist-all
+        run: |
+          sha256sum bulti-*.tar.gz > checksums.txt
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-all/bulti-*.tar.gz
+            dist-all/checksums.txt
+          generate_release_notes: true

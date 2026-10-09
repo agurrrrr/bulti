@@ -10,16 +10,16 @@
 //! 세그먼트 상태: `completed` / `failed` / `incomplete` / `interrupted`.
 //! 결과에는 content / usage / files_touched / depth 와 핸드오프 판정을 포함한다.
 
+use crate::agent::context::estimate_messages_tokens;
 use crate::agent::guards::{
-    check_build_gate, check_empty_loop, check_fffd_degenerate, check_pause_summary,
-    check_stream_repetition, check_stuck_signature, update_after_tool_call, GuardContext,
-    GuardOutcome,
+    GuardContext, GuardOutcome, check_build_gate, check_empty_loop, check_fffd_degenerate,
+    check_pause_summary, check_stream_repetition, check_stuck_signature, update_after_tool_call,
 };
 use crate::agent::handoff::{
-    build_handoff_prompt, is_handoff_summary_acceptable, parse_handoff_response,
-    request_max_tokens, should_attempt_handoff, HandoffDecision, HandoffDepthGuard, HandoffResponse,
+    HandoffDecision, HandoffDepthGuard, HandoffResponse, build_handoff_prompt,
+    is_handoff_summary_acceptable, parse_handoff_response, request_max_tokens,
+    should_attempt_handoff,
 };
-use crate::agent::context::estimate_messages_tokens;
 use crate::config::EndpointConfig;
 use crate::llm::{ChatOptions, ChatRequest, LlmClient, Message};
 use crate::tools::ToolRegistry;
@@ -289,10 +289,7 @@ pub async fn run_segment(
                 // nudge 류: 세그먼트 종료 대신 넛지 user 메시지 push 후 다음 턴으로.
                 if reason.starts_with("nudge:") {
                     guard.pause_nudges += 1;
-                    tracing::warn!(
-                        "가드 nudge: {reason} (pause_nudges={})",
-                        guard.pause_nudges
-                    );
+                    tracing::warn!("가드 nudge: {reason} (pause_nudges={})", guard.pause_nudges);
                     messages.push(Message {
                         role: "user".to_string(),
                         content: Some(
@@ -330,16 +327,15 @@ pub async fn run_segment(
 
                 // TUI 표시용 "호출 중" 이벤트.
                 if let Some(tx) = delta_tx.as_ref() {
-                    let _ = tx
-                        .send(crate::llm::Delta {
-                            tool_call_event: Some(crate::llm::ToolEvent {
-                                name: tc.name.clone(),
-                                args_summary: tool_args_summary(&tc.arguments),
-                                ok: false,
-                                error: None,
-                            }),
-                            ..Default::default()
-                        });
+                    let _ = tx.send(crate::llm::Delta {
+                        tool_call_event: Some(crate::llm::ToolEvent {
+                            name: tc.name.clone(),
+                            args_summary: tool_args_summary(&tc.arguments),
+                            ok: false,
+                            error: None,
+                        }),
+                        ..Default::default()
+                    });
                 }
 
                 let result = registry.dispatch(&tc.name, tc.arguments.clone()).await;
@@ -350,16 +346,15 @@ pub async fn run_segment(
 
                 // TUI 표시용 결과 이벤트 (성공/실패).
                 if let Some(tx) = delta_tx.as_ref() {
-                    let _ = tx
-                        .send(crate::llm::Delta {
-                            tool_call_event: Some(crate::llm::ToolEvent {
-                                name: tc.name.clone(),
-                                args_summary: tool_args_summary(&tc.arguments),
-                                ok,
-                                error,
-                            }),
-                            ..Default::default()
-                        });
+                    let _ = tx.send(crate::llm::Delta {
+                        tool_call_event: Some(crate::llm::ToolEvent {
+                            name: tc.name.clone(),
+                            args_summary: tool_args_summary(&tc.arguments),
+                            ok,
+                            error,
+                        }),
+                        ..Default::default()
+                    });
                 }
 
                 let result_text = match result {
@@ -539,11 +534,11 @@ async fn attempt_handoff(
 /// 이런 턴은 "완료 후보"가 아니라 모델의 생각만 흘러나온 턴이므로
 /// 넛지로 다음 턴을 유도해야 한다 (shepherd #44 run 교훈).
 fn is_reasoning_only_turn(resp: &crate::llm::ChatResponse) -> bool {
-    let content_empty = resp.content.as_deref().map_or(true, |c| c.trim().is_empty());
+    let content_empty = resp.content.as_deref().is_none_or(|c| c.trim().is_empty());
     let reasoning_nonempty = resp
         .reasoning_content
         .as_deref()
-        .map_or(false, |r| !r.trim().is_empty());
+        .is_some_and(|r| !r.trim().is_empty());
     content_empty && reasoning_nonempty && resp.tool_calls.is_empty()
 }
 
@@ -573,9 +568,7 @@ fn tool_args_summary(arguments: &serde_json::Value) -> String {
             let parts: Vec<String> = map
                 .iter()
                 .take(3)
-                .filter_map(|(k, v)| {
-                    v.as_str().map(|s| format!("{k}={s}"))
-                })
+                .filter_map(|(k, v)| v.as_str().map(|s| format!("{k}={s}")))
                 .collect();
             if parts.is_empty() {
                 arguments.to_string()
@@ -585,10 +578,7 @@ fn tool_args_summary(arguments: &serde_json::Value) -> String {
         }
         _ => arguments.to_string(),
     };
-    let mut out: String = s
-        .chars()
-        .take(80)
-        .collect::<String>();
+    let mut out: String = s.chars().take(80).collect::<String>();
     if s.chars().count() > 80 {
         out.push('…');
     }
@@ -610,10 +600,7 @@ fn tool_call_delta(tc: &crate::llm::ToolCall) -> crate::llm::ToolCallDelta {
 
 /// 세그먼트 상태 목록으로 체인 전체 상태를 판정한다.
 pub fn chain_status(segment_statuses: &[SegmentStatus]) -> &'static str {
-    let strs: Vec<&str> = segment_statuses
-        .iter()
-        .map(SegmentStatus::as_str)
-        .collect();
+    let strs: Vec<&str> = segment_statuses.iter().map(SegmentStatus::as_str).collect();
     crate::agent::handoff::chain_status(&strs)
 }
 
@@ -688,10 +675,7 @@ mod tests {
         let result = run_segment(&client, &registry, &params, 0, None).await;
 
         assert_eq!(result.status, SegmentStatus::Completed);
-        assert_eq!(
-            result.handoff,
-            Some(HandoffDecision::Complete)
-        );
+        assert_eq!(result.handoff, Some(HandoffDecision::Complete));
     }
 
     #[tokio::test]
@@ -709,7 +693,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_raw(sse_chunk("").as_str(), "text/event-stream"),
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse_chunk("").as_str(), "text/event-stream"),
             )
             .expect(1)
             .mount(&server)
@@ -730,12 +715,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_raw(
-                    sse_chunk("안녕하세요! 무엇을 도와드릴까요?").as_str(),
-                    "text/event-stream",
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                sse_chunk("안녕하세요! 무엇을 도와드릴까요?").as_str(),
+                "text/event-stream",
+            ))
             .expect(1)
             .mount(&server)
             .await;
@@ -769,14 +752,23 @@ mod tests {
         );
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(body.as_str(), "text/event-stream"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_str(), "text/event-stream"),
+            )
             .expect(3)
             .mount(&server)
             .await;
 
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
-        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0, None).await;
+        let result = run_segment(
+            &client,
+            &registry,
+            &params(server.uri().as_str(), 10),
+            0,
+            None,
+        )
+        .await;
         // 1·2턴: 넛지 후 재요청, 3턴째 reasoning-only → incomplete
         assert_eq!(result.status, SegmentStatus::Incomplete);
     }
@@ -815,7 +807,14 @@ mod tests {
 
         let client = LlmClient::new();
         let registry = ToolRegistry::new(false);
-        let result = run_segment(&client, &registry, &params(server.uri().as_str(), 10), 0, None).await;
+        let result = run_segment(
+            &client,
+            &registry,
+            &params(server.uri().as_str(), 10),
+            0,
+            None,
+        )
+        .await;
         // 1턴 reasoning-only → 넛지, 2턴 정상 텍스트 → Completed
         assert_eq!(result.status, SegmentStatus::Completed);
         assert!(result.content.contains("안녕하세요"));
@@ -847,7 +846,11 @@ mod tests {
     #[test]
     fn is_reasoning_only_turn_negative_has_content() {
         // content 있으면 reasoning만 아니므로 false
-        assert!(!is_reasoning_only_turn(&resp(Some("답변"), Some("고민 중"), vec![])));
+        assert!(!is_reasoning_only_turn(&resp(
+            Some("답변"),
+            Some("고민 중"),
+            vec![]
+        )));
     }
 
     #[test]
@@ -864,7 +867,11 @@ mod tests {
             name: "bash".to_string(),
             arguments: serde_json::json!({"command": "ls"}),
         };
-        assert!(!is_reasoning_only_turn(&resp(None, Some("고민 중"), vec![tc])));
+        assert!(!is_reasoning_only_turn(&resp(
+            None,
+            Some("고민 중"),
+            vec![tc]
+        )));
     }
 
     /// 컨텍스트가 이미 임계를 넘으면 본 요청 전에 핸드오프한다.
@@ -905,12 +912,7 @@ mod tests {
         assert_eq!(result.status, SegmentStatus::Completed);
         assert_eq!(result.handoff, Some(HandoffDecision::Handoff));
         assert!(result.handoff_response.is_some());
-        assert!(!result
-            .handoff_response
-            .unwrap()
-            .next_task
-            .trim()
-            .is_empty());
+        assert!(!result.handoff_response.unwrap().next_task.trim().is_empty());
     }
 
     #[test]

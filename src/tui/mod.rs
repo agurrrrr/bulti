@@ -184,8 +184,8 @@ impl RenderCache {
     }
 }
 
-/// 실제 재래핑이 일어난 횟수 (캐시 미스)는 `RenderCache::wrap_misses()` 로
-/// 캐시별로 추적한다 (전역 카운터는 병렬 테스트에서 오염될 수 있어 제거).
+// 실제 재래핑이 일어난 횟수 (캐시 미스)는 `RenderCache::wrap_misses()` 로
+// 캐시별로 추적한다 (전역 카운터는 병렬 테스트에서 오염될 수 있어 제거).
 
 /// 한 턴(사용자 프롬프트 → 응답)의 결과. chat_cmd 의 `run_turn` 과
 /// TUI processor 가 공유하는 규약이다.
@@ -398,7 +398,7 @@ where
             // 함께 표시한다 (스피너 프레임은 100ms 주기 결정적 계산).
             let progress = pending_turn
                 .is_some()
-                .then(|| turn_started_at)
+                .then_some(turn_started_at)
                 .flatten()
                 .map(|t| {
                     let ms = t.elapsed().as_millis() as u64;
@@ -1296,7 +1296,7 @@ fn scroll_from_bottom(total_lines: usize, height: u16, offset_from_bottom: usize
 /// 히스토리 탐색: ↑(up=true) 또는 ↓(up=false) 로 이동한 다음 인덱스를 반환.
 /// - `up`: `None` → 마지막 항목, `Some(i)` → `i-1` (처음 이상으로 못 감).
 /// - `down`: `Some(i)` → `i-1` (0 이하면 `None`, 탐색 종료·입력창 비움).
-/// `history` 가 비어 있으면 `None`.
+///   `history` 가 비어 있으면 `None`.
 pub fn step_history(history: &[String], history_idx: Option<usize>, up: bool) -> Option<usize> {
     if history.is_empty() {
         return None;
@@ -1608,6 +1608,7 @@ fn update_completions(
 
 /// 상태 표시 — 세션 id·저장 여부·세션 누적 토큰·최근 응답 토큰/속도.
 /// 주의: Session lock 금지 — 누적 토큰은 호출부에서 전달받는다.
+#[allow(clippy::too_many_arguments)]
 fn draw_status(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1810,15 +1811,15 @@ mod tests {
     fn move_word_forward() {
         let s = "hello world";
         let mut c = 0;
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 5);
         // 공백 한 문자 건너뛰어 다음 단어 시작.
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 6);
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 11);
         // 끝에서 더 못 감.
-        assert!(!move_cursor_word(&s, &mut c, true));
+        assert!(!move_cursor_word(s, &mut c, true));
     }
 
     /// move_cursor_word: 뒤쪽 단어 경계 이동.
@@ -1826,11 +1827,11 @@ mod tests {
     fn move_word_backward() {
         let s = "hello world";
         let mut c = 11;
-        assert!(move_cursor_word(&s, &mut c, false));
+        assert!(move_cursor_word(s, &mut c, false));
         assert_eq!(c, 6);
-        assert!(move_cursor_word(&s, &mut c, false));
+        assert!(move_cursor_word(s, &mut c, false));
         assert_eq!(c, 0);
-        assert!(!move_cursor_word(&s, &mut c, false));
+        assert!(!move_cursor_word(s, &mut c, false));
     }
 
     /// move_cursor_word: 한글은 한 문자 단위.
@@ -1838,17 +1839,17 @@ mod tests {
     fn move_word_korean() {
         let s = "안녕 세계";
         let mut c = 0;
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 3); // '안'
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 6); // '녕'
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 7); // 공백
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 10);
-        assert!(move_cursor_word(&s, &mut c, true));
+        assert!(move_cursor_word(s, &mut c, true));
         assert_eq!(c, 13);
-        assert!(!move_cursor_word(&s, &mut c, true));
+        assert!(!move_cursor_word(s, &mut c, true));
     }
 
     /// line_start/line_end: 커서가 속한 줄의 경계를 찾는다.

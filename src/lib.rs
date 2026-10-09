@@ -2,7 +2,6 @@
 //!
 //! 라이브러리 크레이트: 모든 모듈을 `pub`으로 노출해 통합 테스트(`tests/`)와
 //! 외부 오케스트레이션에서 재사용할 수 있게 한다 (DESIGN.md §4.12).
-
 #![deny(clippy::all)]
 #![deny(unsafe_code)]
 

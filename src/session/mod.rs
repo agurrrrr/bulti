@@ -122,9 +122,7 @@ impl Session {
             entry.0 += t.input_tokens;
             entry.1 += t.output_tokens;
         }
-        map.into_iter()
-            .map(|(m, (i, o))| (m, i, o))
-            .collect()
+        map.into_iter().map(|(m, (i, o))| (m, i, o)).collect()
     }
 
     /// 재개용 대화 기록 문자열을 만든다. 이전 턴의 사용자·모델 메시지를

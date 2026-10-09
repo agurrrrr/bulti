@@ -95,9 +95,7 @@ fn discover_in_dir(dir: &Path) -> Result<Vec<Skill>, SkillError> {
 
         if let Some((name, skill_file)) = entry_path {
             if let Some(index) = parse_skill_file(&name, &skill_file)? {
-                skills.push(Skill {
-                    index,
-                });
+                skills.push(Skill { index });
             }
         }
     }
@@ -191,9 +189,9 @@ pub fn parse_frontmatter(body: &str) -> Result<(String, String), SkillError> {
     }
     // 첫 `---` 이후부터 다음 `---` 까지를 frontmatter 블록으로 본다.
     let after_open = &trimmed[3..];
-    let close_pos = after_open.find("\n---").ok_or_else(|| {
-        SkillError::MissingFrontmatter("닫는 --- 를 찾을 수 없음".into())
-    })?;
+    let close_pos = after_open
+        .find("\n---")
+        .ok_or_else(|| SkillError::MissingFrontmatter("닫는 --- 를 찾을 수 없음".into()))?;
     let block = &after_open[..close_pos];
 
     let mut name: Option<String> = None;
@@ -207,8 +205,7 @@ pub fn parse_frontmatter(body: &str) -> Result<(String, String), SkillError> {
         }
     }
     let name = name.ok_or_else(|| SkillError::MissingField("name".into()))?;
-    let description =
-        description.ok_or_else(|| SkillError::MissingField("description".into()))?;
+    let description = description.ok_or_else(|| SkillError::MissingField("description".into()))?;
     Ok((name, description))
 }
 
@@ -225,11 +222,8 @@ mod tests {
     /// 테스트별 고유 임시 디렉터리. 병렬 실행 시 테스트·역할(root/global)별로
     /// 서로 다른 디렉터리를 사용해 충돌을 방지한다.
     fn temp_dir(label: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "bulti_skill_test_{}_{}",
-            std::process::id(),
-            label
-        ));
+        let d =
+            std::env::temp_dir().join(format!("bulti_skill_test_{}_{}", std::process::id(), label));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

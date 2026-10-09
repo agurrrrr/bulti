@@ -64,13 +64,10 @@ pub fn register(reg: &ToolRegistry) {
             );
 
             // 타임아웃: tokio::time::timeout으로 감싼다.
-            let timed = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout),
-                async {
-                    let c = child_opt.take().unwrap();
-                    c.wait_with_output().await
-                },
-            )
+            let timed = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+                let c = child_opt.take().unwrap();
+                c.wait_with_output().await
+            })
             .await;
 
             match timed {
@@ -113,7 +110,12 @@ pub fn register(reg: &ToolRegistry) {
             }
         })
     });
-    reg.register("bash", "셸 명령 실행 (cwd: 프로젝트 루트, 세션 없음, 출력 64KB 상한)", schema(), handler);
+    reg.register(
+        "bash",
+        "셸 명령 실행 (cwd: 프로젝트 루트, 세션 없음, 출력 64KB 상한)",
+        schema(),
+        handler,
+    );
 }
 
 #[cfg(test)]
@@ -123,9 +125,9 @@ mod tests {
     fn dispatch(args: serde_json::Value) -> String {
         let reg = ToolRegistry::new(false);
         register(&reg);
-        tokio::runtime::Runtime::new().unwrap().block_on(
-            async move { reg.dispatch("bash", args).await.unwrap() },
-        )
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reg.dispatch("bash", args).await.unwrap() })
     }
 
     #[test]

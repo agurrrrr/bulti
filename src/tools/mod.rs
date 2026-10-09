@@ -193,9 +193,22 @@ pub fn normalize_schema(schema: serde_json::Value) -> serde_json::Value {
 fn extract_path_hints(cmd: &str) -> Vec<String> {
     // 상태 변경을 유발할 가능성이 있는 명령어 접두사.
     const MUTATING: &[&str] = &[
-        "write_file", "edit_file", "cat >", "cat >>", "echo >", "echo >>",
-        "mkdir -p", "touch ", "rm ", "mv ", "cp ", "sed -i", "git add",
-        "tee ", ">", ">>",
+        "write_file",
+        "edit_file",
+        "cat >",
+        "cat >>",
+        "echo >",
+        "echo >>",
+        "mkdir -p",
+        "touch ",
+        "rm ",
+        "mv ",
+        "cp ",
+        "sed -i",
+        "git add",
+        "tee ",
+        ">",
+        ">>",
     ];
     // 접두사가 있는 하위 명령만 검사한다. (전체 문자열에서 접두사 발견 시)
     let mut paths: Vec<String> = Vec::new();
@@ -284,11 +297,7 @@ mod tests {
                 },
                 "required": ["text"],
             }),
-            Arc::new(|a| {
-                Box::pin(async move {
-                    Ok(a["text"].as_str().unwrap_or("").to_string())
-                })
-            }),
+            Arc::new(|a| Box::pin(async move { Ok(a["text"].as_str().unwrap_or("").to_string()) })),
         );
 
         // 정의에 등록된 툴은 디스패처에서도 실행 가능해야 한다.
@@ -318,7 +327,10 @@ mod tests {
         });
         let normalized = normalize_schema(schema);
         let required = normalized["required"].as_array().unwrap();
-        assert!(required.is_empty(), "required: null 은 [] 로 정규화되어야 함");
+        assert!(
+            required.is_empty(),
+            "required: null 은 [] 로 정규화되어야 함"
+        );
     }
 
     /// 이미 `required` 배열이면 그대로 유지된다.
@@ -404,7 +416,10 @@ mod tests {
 
         let touched = reg.files_touched();
         assert!(touched.contains(&"src/new.rs".to_string()), "{touched:?}");
-        assert!(touched.contains(&"src/tools/mod.rs".to_string()), "{touched:?}");
+        assert!(
+            touched.contains(&"src/tools/mod.rs".to_string()),
+            "{touched:?}"
+        );
         assert!(touched.contains(&"out.txt".to_string()), "{touched:?}");
     }
 
@@ -434,9 +449,12 @@ mod tests {
             BTreeMap::new(),
             Arc::new(crate::mcp::McpManager::new()),
         );
-        reg.dispatch("write_file", serde_json::json!({"path": "a.rs", "content": "x"}))
-            .await
-            .unwrap();
+        reg.dispatch(
+            "write_file",
+            serde_json::json!({"path": "a.rs", "content": "x"}),
+        )
+        .await
+        .unwrap();
         assert_eq!(reg.files_touched(), vec!["a.rs".to_string()]);
         reg.clear_files_touched();
         assert!(reg.files_touched().is_empty());

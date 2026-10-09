@@ -335,7 +335,7 @@ pub fn suggest_similar(input: &str) -> Vec<String> {
     }
     // 입력 길이에 비례해 허용 거리를 늘린다. 짧은 이름(3자)은 오타 1자만,
     // 4자 이상은 위치 교환 등 오타 2자까지 허용한다.
-    let threshold = (q.len() + 3) / 4;
+    let threshold = q.len().div_ceil(4);
     let mut scored: Vec<(usize, &str)> = Vec::new();
     for cmd in COMMANDS {
         let mut best = usize::MAX;
